@@ -538,7 +538,7 @@ function renderResults(hourGroups, specialList, targetDate, isFriday, defaultHou
   const dayName = dayNames[targetDate.getDay()];
   const m = targetDate.getMonth() + 1;
   const d = targetDate.getDate();
-  dateEl.textContent = `${m}월 ${d}일 (${dayName}) / 기본 출근: ${defaultHour}시`;
+  dateEl.textContent = `${m}월 ${d}일 (${dayName})`;
 
   let html = '';
   const hours = [8, 9, 10];
