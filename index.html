@@ -361,7 +361,13 @@ function analyze() {
 
   for (const [name, info] of Object.entries(result)) {
     if (!members.includes(name)) continue;
-    if (info.note) {
+    if (info.hour !== null && info.note) {
+      // Both hour and note (e.g. "8출 오후반차")
+      const h = info.hour;
+      if (!hourGroups[h]) hourGroups[h] = [];
+      hourGroups[h].push(name);
+      specialList.push({ name, note: info.note });
+    } else if (info.note) {
       specialList.push({ name, note: info.note });
     } else if (info.hour !== null) {
       const h = info.hour;
@@ -460,12 +466,14 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
   for (const line of lines) {
     const trimmed = line.trim();
 
-    // Skip reactions (:emoji:), pure numbers, RE: replies, '작성' line
+    // Skip reactions (:emoji:), pure numbers, '작성' line
     if (/^:[a-z_+]+:$/.test(trimmed)) continue;
     if (/^\d+$/.test(trimmed)) continue;
-    if (/^RE:/.test(trimmed)) continue;
     if (trimmed === '작성') continue;
     if (/^\[.+\]$/.test(trimmed)) continue; // [status] line
+
+    // RE: lines - strip prefix and parse the content
+    const reStripped = trimmed.startsWith('RE:') ? trimmed.slice(3).trim() : trimmed;
 
     // Track send time (오전/오후 H:MM)
     const timeMatch = trimmed.match(/^(오전|오후)\s*(\d{1,2}):(\d{2})$/);
@@ -478,7 +486,7 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
     }
 
     // Check if line contains explicit date
-    const dateMatch = trimmed.match(/(\d{1,2})월\s*(\d{1,2})일/);
+    const dateMatch = reStripped.match(/(\d{1,2})월\s*(\d{1,2})일/);
     let dateMatches = false;
 
     if (dateMatch) {
@@ -490,8 +498,6 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
       if (isSameDay) {
         dateMatches = true;
       } else if (isLeadUpDay) {
-        // For Monday: Sat/Sun anytime, Mon morning < 10AM
-        // For weekdays: prev day anytime is fine (evening posts)
         if (sameDate(chatDate, targetDate)) {
           dateMatches = lastSendTime !== null && lastSendTime < 10;
         } else {
@@ -503,24 +509,21 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
     if (!dateMatches) continue;
 
     // Admin summary (N출 N명) - skip
-    if (/\d+출\s*\d+명/.test(trimmed)) continue;
+    if (/\d+출\s*\d+명/.test(reStripped)) continue;
 
     // 퇴사 joke - skip
-    if (/퇴사/.test(trimmed)) continue;
+    if (/퇴사/.test(reStripped)) continue;
 
-    // Check for special notes
-    const noteMatch = trimmed.match(/(연차|병가|공가|반차|오전반차|오후반차)/);
-    if (noteMatch) {
-      note = noteMatch[1];
-      return { hour: null, note };
-    }
+    // Parse hour and note from same line (e.g. "8출 오후반차")
+    const hourMatch = reStripped.match(/(\d{1,2})\s*(출근|출)/);
+    const noteMatch = reStripped.match(/(연차|병가|공가|오전반차|오후반차|반차)/);
 
-    // Check for check-in hour
-    const hourMatch = trimmed.match(/(\d{1,2})\s*(출근|출)\s*(입니다|합니다)?/);
-    if (hourMatch) {
-      hour = parseInt(hourMatch[1]);
-      return { hour, note: null };
-    }
+    // Skip if neither found
+    if (!hourMatch && !noteMatch) continue;
+
+    // Overwrite with latest match (corrections win)
+    if (hourMatch) hour = parseInt(hourMatch[1]);
+    if (noteMatch) note = noteMatch[1];
   }
 
   return hour !== null || note !== null ? { hour, note } : null;
