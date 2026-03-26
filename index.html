@@ -261,7 +261,7 @@ function analyze() {
   // For each block, try to extract check-in info for the target date
   for (const block of blocks) {
     const name = block.name;
-    const info = parseCheckinInfo(block.lines, targetMonth, targetDay);
+    const info = parseCheckinInfo(block.lines, targetMonth, targetDay, targetDate, block.chatDate);
     if (info) {
       // Only track registered members, but also track unregistered ones found in chat
       if (result[name]) {
@@ -305,18 +305,35 @@ function analyze() {
 function parseSenderBlocks(text) {
   const lines = text.split('\n');
   const blocks = [];
-  // Sender pattern: English Name(한글이름) with optional [status]
   const senderRegex = /^[A-Za-z\s\(\)]+\(([\uac00-\ud7a3]+)\)/;
+  // Date separator: "2026.03.27 금요일"
+  const dateSepRegex = /^(\d{4})\.(\d{2})\.(\d{2})\s/;
 
   let currentName = null;
   let currentLines = [];
+  let currentChatDate = null; // date from separator line
 
   for (const line of lines) {
+    // Check for date separator line
+    const dateSepMatch = line.match(dateSepRegex);
+    if (dateSepMatch) {
+      if (currentName) {
+        blocks.push({ name: currentName, lines: currentLines, chatDate: currentChatDate });
+      }
+      currentName = null;
+      currentLines = [];
+      currentChatDate = new Date(
+        parseInt(dateSepMatch[1]),
+        parseInt(dateSepMatch[2]) - 1,
+        parseInt(dateSepMatch[3])
+      );
+      continue;
+    }
+
     const match = line.match(senderRegex);
     if (match) {
-      // Save previous block
       if (currentName) {
-        blocks.push({ name: currentName, lines: currentLines });
+        blocks.push({ name: currentName, lines: currentLines, chatDate: currentChatDate });
       }
       currentName = match[1];
       currentLines = [];
@@ -324,17 +341,31 @@ function parseSenderBlocks(text) {
       currentLines.push(line);
     }
   }
-  // Save last block
   if (currentName) {
-    blocks.push({ name: currentName, lines: currentLines });
+    blocks.push({ name: currentName, lines: currentLines, chatDate: currentChatDate });
   }
 
   return blocks;
 }
 
-function parseCheckinInfo(lines, targetMonth, targetDay) {
+function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate) {
   let hour = null;
   let note = null;
+  let lastSendTime = null; // track send time for dateless messages
+
+  // Check if chatDate is the day after targetDate (for next-morning messages)
+  let isNextDay = false;
+  if (chatDate && targetDate) {
+    const nextDay = new Date(targetDate);
+    nextDay.setDate(nextDay.getDate() + 1);
+    isNextDay = chatDate.getFullYear() === nextDay.getFullYear()
+      && chatDate.getMonth() === nextDay.getMonth()
+      && chatDate.getDate() === nextDay.getDate();
+  }
+  const isSameDay = chatDate && targetDate
+    && chatDate.getFullYear() === targetDate.getFullYear()
+    && chatDate.getMonth() === targetDate.getMonth()
+    && chatDate.getDate() === targetDate.getDate();
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -344,21 +375,41 @@ function parseCheckinInfo(lines, targetMonth, targetDay) {
     if (/^\d+$/.test(trimmed)) continue;
     if (/^RE:/.test(trimmed)) continue;
     if (trimmed === '작성') continue;
-    if (/^오[전후]\s*\d/.test(trimmed)) continue; // timestamp line
     if (/^\[.+\]$/.test(trimmed)) continue; // [status] line
 
-    // Check if line contains target date
+    // Track send time (오전/오후 H:MM)
+    const timeMatch = trimmed.match(/^(오전|오후)\s*(\d{1,2}):(\d{2})$/);
+    if (timeMatch) {
+      let h = parseInt(timeMatch[2]);
+      if (timeMatch[1] === '오후' && h !== 12) h += 12;
+      if (timeMatch[1] === '오전' && h === 12) h = 0;
+      lastSendTime = h;
+      continue;
+    }
+
+    // Check if line contains explicit date
     const dateMatch = trimmed.match(/(\d{1,2})월\s*(\d{1,2})일/);
-    if (!dateMatch) continue;
+    let dateMatches = false;
 
-    const msgMonth = parseInt(dateMatch[1]);
-    const msgDay = parseInt(dateMatch[2]);
-    if (msgMonth !== targetMonth || msgDay !== targetDay) continue;
+    if (dateMatch) {
+      const msgMonth = parseInt(dateMatch[1]);
+      const msgDay = parseInt(dateMatch[2]);
+      dateMatches = (msgMonth === targetMonth && msgDay === targetDay);
+    } else {
+      // No date in message: check if it's same day or next morning before 10AM
+      if (isSameDay) {
+        dateMatches = true;
+      } else if (isNextDay && lastSendTime !== null && lastSendTime < 10) {
+        dateMatches = true;
+      }
+    }
 
-    // Found a line for target date - check for admin summary (N출 N명)
+    if (!dateMatches) continue;
+
+    // Admin summary (N출 N명) - skip
     if (/\d+출\s*\d+명/.test(trimmed)) continue;
 
-    // Check for 퇴사 (joke)
+    // 퇴사 joke - skip
     if (/퇴사/.test(trimmed)) continue;
 
     // Check for special notes
