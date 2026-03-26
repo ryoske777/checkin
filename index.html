@@ -141,6 +141,28 @@
   .modal textarea { height: 300px; }
   .modal .row { justify-content: flex-end; }
 
+  /* Guide */
+  .guide {
+    display: none;
+    background: #f8f9fb;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+  }
+  .guide.show { display: block; }
+  .guide-step {
+    font-size: 0.9rem;
+    color: #333;
+    padding: 4px 0;
+  }
+  .guide-note {
+    font-size: 0.8rem;
+    color: #888;
+    padding: 2px 0;
+    margin-top: 4px;
+  }
+
   .no-result {
     text-align: center;
     color: #999;
@@ -156,8 +178,18 @@
 
   <div class="card">
     <div class="card-header">
-      <h2>채팅 내용 붙여넣기</h2>
-      <button class="btn-secondary btn-small" onclick="openModal()">팀원 관리</button>
+      <h2>채팅 내용</h2>
+      <div>
+        <button class="btn-secondary btn-small" onclick="toggleGuide()">사용방법</button>
+        <button class="btn-secondary btn-small" onclick="openModal()">팀원 관리</button>
+      </div>
+    </div>
+    <div class="guide" id="guide">
+      <div class="guide-step"><b>1.</b> 두레이 채팅방에서 근태 메시지가 있는 구간을 <b>드래그하여 복사</b> (Ctrl+C)</div>
+      <div class="guide-step"><b>2.</b> 아래 입력창에 <b>붙여넣기</b> (Ctrl+V)</div>
+      <div class="guide-step"><b>3.</b> <b>분석하기</b> 버튼 클릭</div>
+      <div class="guide-note">* 복사할 때 상단에 날짜 구분선(예: 2026.03.25 수요일)이 포함되어야 합니다.</div>
+      <div class="guide-note">* 다음날 오전 10시 전에 보낸 메시지도 자동으로 포함됩니다.</div>
     </div>
     <textarea id="chatInput" placeholder="두레이 채팅방에서 복사한 내용을 여기에 붙여넣으세요..."></textarea>
     <div class="row">
@@ -167,7 +199,7 @@
 
   <div class="card" id="results">
     <div class="card-header">
-      <h2>분석 결과</h2>
+      <h2>조회 결과</h2>
       <button class="btn-secondary btn-small" onclick="copyResult()">복사</button>
     </div>
     <div class="result-date" id="resultDate"></div>
@@ -219,6 +251,10 @@ function saveMembers() {
 function resetMembers() {
   localStorage.removeItem('checkin_members');
   document.getElementById('memberInput').value = DEFAULT_MEMBERS.join('\n');
+}
+
+function toggleGuide() {
+  document.getElementById('guide').classList.toggle('show');
 }
 
 document.getElementById('modal').addEventListener('click', function(e) {
