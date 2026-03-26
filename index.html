@@ -52,14 +52,6 @@
     align-items: center;
     margin-top: 12px;
   }
-  input[type="date"] {
-    padding: 8px 12px;
-    border: 2px solid #e0e0e0;
-    border-radius: 8px;
-    font-size: 0.9rem;
-    font-family: inherit;
-  }
-  input[type="date"]:focus { outline: none; border-color: #4a6cf7; }
   button {
     padding: 8px 20px;
     border: none;
@@ -149,13 +141,6 @@
   .modal textarea { height: 300px; }
   .modal .row { justify-content: flex-end; }
 
-  .auto-label {
-    color: #4a6cf7;
-    font-size: 0.85rem;
-    font-weight: 600;
-  }
-  .auto-label.hidden { display: none; }
-
   .no-result {
     text-align: center;
     color: #999;
@@ -176,8 +161,6 @@
     </div>
     <textarea id="chatInput" placeholder="두레이 채팅방에서 복사한 내용을 여기에 붙여넣으세요..."></textarea>
     <div class="row">
-      <input type="date" id="dateInput">
-      <span id="autoLabel" class="auto-label">(자동)</span>
       <button class="btn-primary" onclick="analyze()">분석하기</button>
     </div>
   </div>
@@ -242,29 +225,9 @@ document.getElementById('modal').addEventListener('click', function(e) {
   if (e.target === this) this.classList.remove('show');
 });
 
-// Set default date to today
-document.getElementById('dateInput').valueAsDate = new Date();
-
-// Auto-detect date from pasted chat content
-let isAutoDate = true;
-
-document.getElementById('chatInput').addEventListener('input', function() {
-  const detected = detectDateFromChat(this.value);
-  if (detected) {
-    document.getElementById('dateInput').valueAsDate = detected;
-    isAutoDate = true;
-    document.getElementById('autoLabel').classList.remove('hidden');
-  }
-});
-
-// Manual date change removes auto label
-document.getElementById('dateInput').addEventListener('change', function() {
-  isAutoDate = false;
-  document.getElementById('autoLabel').classList.add('hidden');
-});
+// ===== Parsing Logic =====
 
 function detectDateFromChat(text) {
-  // Find the first date separator: "2026.03.25 수요일"
   const dateSepRegex = /(\d{4})\.(\d{2})\.(\d{2})\s/g;
   let firstDate = null;
 
@@ -277,7 +240,6 @@ function detectDateFromChat(text) {
   }
 
   if (firstDate) {
-    // Target date = first date separator + 1 day
     const target = new Date(firstDate);
     target.setDate(target.getDate() + 1);
     return target;
@@ -285,14 +247,17 @@ function detectDateFromChat(text) {
   return null;
 }
 
-// ===== Parsing Logic =====
-
 function analyze() {
   const text = document.getElementById('chatInput').value.trim();
   if (!text) return;
 
-  const dateStr = document.getElementById('dateInput').value;
-  const targetDate = new Date(dateStr);
+  const targetDate = detectDateFromChat(text);
+  if (!targetDate) {
+    document.getElementById('resultContent').innerHTML =
+      '<div class="no-result">날짜 구분선(예: 2026.03.25 수요일)을 찾을 수 없습니다.</div>';
+    document.getElementById('results').classList.add('show');
+    return;
+  }
   const targetMonth = targetDate.getMonth() + 1;
   const targetDay = targetDate.getDate();
   const dayOfWeek = targetDate.getDay(); // 0=Sun, 5=Fri
