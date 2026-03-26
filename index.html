@@ -100,6 +100,7 @@
     font-weight: 600;
   }
   .result-label.special .count { background: #f59e0b; }
+  .result-label.weekend .count { background: #ef4444; }
   .result-names {
     color: #555;
     font-size: 0.95rem;
@@ -263,6 +264,16 @@ document.getElementById('modal').addEventListener('click', function(e) {
 
 // ===== Parsing Logic =====
 
+function nextBusinessDay(date) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + 1);
+  // Skip Saturday(6) and Sunday(0)
+  while (d.getDay() === 0 || d.getDay() === 6) {
+    d.setDate(d.getDate() + 1);
+  }
+  return d;
+}
+
 function detectDateFromChat(text) {
   const dateSepRegex = /(\d{4})\.(\d{2})\.(\d{2})\s/g;
   let firstDate = null;
@@ -276,9 +287,7 @@ function detectDateFromChat(text) {
   }
 
   if (firstDate) {
-    const target = new Date(firstDate);
-    target.setDate(target.getDate() + 1);
-    return target;
+    return nextBusinessDay(firstDate);
   }
   return null;
 }
@@ -303,22 +312,44 @@ function analyze() {
 
   const members = getMembers();
   const result = {}; // name -> { hour: number | null, note: string | null }
+  const weekendWork = {}; // dateKey -> { name -> { hour, note } }
 
   // Parse chat into sender blocks
   const blocks = parseSenderBlocks(text);
 
-  // For each block, try to extract check-in info for the target date
+  // Collect weekend dates to check (Sat/Sun before target Monday)
+  const weekendDates = [];
+  if (dayOfWeek === 1) { // Monday
+    const sat = new Date(targetDate);
+    sat.setDate(sat.getDate() - 2);
+    const sun = new Date(targetDate);
+    sun.setDate(sun.getDate() - 1);
+    weekendDates.push(sat, sun);
+  }
+
   for (const block of blocks) {
     const name = block.name;
+
+    // Parse for target date
     const info = parseCheckinInfo(block.lines, targetMonth, targetDay, targetDate, block.chatDate);
     if (info) {
-      // Only track registered members, but also track unregistered ones found in chat
       if (result[name]) {
-        // If already has info, keep the latest or merge
         if (info.note) result[name].note = info.note;
         if (info.hour !== null) result[name].hour = info.hour;
       } else {
         result[name] = info;
+      }
+    }
+
+    // Parse for weekend work (only if target is Monday)
+    for (const wd of weekendDates) {
+      const wm = wd.getMonth() + 1;
+      const wday = wd.getDate();
+      const wInfo = parseCheckinInfo(block.lines, wm, wday, wd, block.chatDate, true);
+      if (wInfo) {
+        const key = `${wm}/${wday}`;
+        if (!weekendWork[key]) weekendWork[key] = { date: wd, entries: {} };
+        weekendWork[key].entries[name] = wInfo;
       }
     }
   }
@@ -329,7 +360,7 @@ function analyze() {
   const allProcessed = new Set(Object.keys(result));
 
   for (const [name, info] of Object.entries(result)) {
-    if (!members.includes(name)) continue; // skip non-members
+    if (!members.includes(name)) continue;
     if (info.note) {
       specialList.push({ name, note: info.note });
     } else if (info.hour !== null) {
@@ -348,7 +379,7 @@ function analyze() {
   }
 
   // Render results
-  renderResults(hourGroups, specialList, targetDate, isFriday, defaultHour);
+  renderResults(hourGroups, specialList, targetDate, isFriday, defaultHour, weekendWork);
 }
 
 function parseSenderBlocks(text) {
@@ -397,24 +428,34 @@ function parseSenderBlocks(text) {
   return blocks;
 }
 
-function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate) {
+function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, weekendOnly) {
   let hour = null;
   let note = null;
-  let lastSendTime = null; // track send time for dateless messages
+  let lastSendTime = null;
 
-  // Check if chatDate is the day after targetDate (for next-morning messages)
-  let isNextDay = false;
-  if (chatDate && targetDate) {
-    const nextDay = new Date(targetDate);
-    nextDay.setDate(nextDay.getDate() + 1);
-    isNextDay = chatDate.getFullYear() === nextDay.getFullYear()
-      && chatDate.getMonth() === nextDay.getMonth()
-      && chatDate.getDate() === nextDay.getDate();
+  function sameDate(a, b) {
+    return a && b && a.getFullYear() === b.getFullYear()
+      && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
   }
-  const isSameDay = chatDate && targetDate
-    && chatDate.getFullYear() === targetDate.getFullYear()
-    && chatDate.getMonth() === targetDate.getMonth()
-    && chatDate.getDate() === targetDate.getDate();
+
+  const isSameDay = sameDate(chatDate, targetDate);
+
+  // For dateless messages: which chatDates should map to targetDate?
+  let isLeadUpDay = false;
+  if (chatDate && targetDate && !isSameDay) {
+    const targetDow = targetDate.getDay();
+    if (targetDow === 1) {
+      // Monday: accept Fri evening, Sat, Sun, Mon morning
+      const fri = new Date(targetDate); fri.setDate(fri.getDate() - 3);
+      const sat = new Date(targetDate); sat.setDate(sat.getDate() - 2);
+      const sun = new Date(targetDate); sun.setDate(sun.getDate() - 1);
+      isLeadUpDay = sameDate(chatDate, fri) || sameDate(chatDate, sat) || sameDate(chatDate, sun);
+    } else {
+      // Weekday: accept previous day
+      const prev = new Date(targetDate); prev.setDate(prev.getDate() - 1);
+      isLeadUpDay = sameDate(chatDate, prev);
+    }
+  }
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -444,12 +485,18 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate) {
       const msgMonth = parseInt(dateMatch[1]);
       const msgDay = parseInt(dateMatch[2]);
       dateMatches = (msgMonth === targetMonth && msgDay === targetDay);
-    } else {
-      // No date in message: check if it's same day or next morning before 10AM
+    } else if (!weekendOnly) {
+      // No date in message: use chatDate context
       if (isSameDay) {
         dateMatches = true;
-      } else if (isNextDay && lastSendTime !== null && lastSendTime < 10) {
-        dateMatches = true;
+      } else if (isLeadUpDay) {
+        // For Monday: Sat/Sun anytime, Mon morning < 10AM
+        // For weekdays: prev day anytime is fine (evening posts)
+        if (sameDate(chatDate, targetDate)) {
+          dateMatches = lastSendTime !== null && lastSendTime < 10;
+        } else {
+          dateMatches = true;
+        }
       }
     }
 
@@ -479,7 +526,7 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate) {
   return hour !== null || note !== null ? { hour, note } : null;
 }
 
-function renderResults(hourGroups, specialList, targetDate, isFriday, defaultHour) {
+function renderResults(hourGroups, specialList, targetDate, isFriday, defaultHour, weekendWork) {
   const resultsEl = document.getElementById('results');
   const contentEl = document.getElementById('resultContent');
   const dateEl = document.getElementById('resultDate');
@@ -517,6 +564,27 @@ function renderResults(hourGroups, specialList, targetDate, isFriday, defaultHou
       <div class="result-label special">특이사항 <span class="count">${specialList.length}명</span></div>
       <div class="result-names">${items}</div>
     </div>`;
+  }
+
+  // Weekend work section
+  if (weekendWork && Object.keys(weekendWork).length > 0) {
+    const dayNames = ['일','월','화','수','목','금','토'];
+    for (const [key, data] of Object.entries(weekendWork)) {
+      const wd = data.date;
+      const wDayName = dayNames[wd.getDay()];
+      const entries = Object.entries(data.entries)
+        .map(([name, info]) => {
+          if (info.note) return `${name}(${info.note})`;
+          if (info.hour !== null) return `${name}(${info.hour}시)`;
+          return name;
+        });
+      if (entries.length > 0) {
+        html += `<div class="result-group">
+          <div class="result-label weekend">주말근무 ${wd.getMonth()+1}월 ${wd.getDate()}일 (${wDayName}) <span class="count">${entries.length}명</span></div>
+          <div class="result-names">${entries.join(', ')}</div>
+        </div>`;
+      }
+    }
   }
 
   if (!html) {
