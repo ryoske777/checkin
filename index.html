@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>출첵 파서</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', -apple-system, sans-serif;
+    background: #f0f2f5;
+    color: #1a1a2e;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  .container { max-width: 800px; margin: 0 auto; }
+  h1 {
+    text-align: center;
+    font-size: 1.6rem;
+    margin-bottom: 20px;
+    color: #1a1a2e;
+  }
+  .card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  }
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+  .card-header h2 { font-size: 1.1rem; color: #333; }
+  textarea {
+    width: 100%;
+    height: 200px;
+    border: 2px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 0.9rem;
+    font-family: inherit;
+    resize: vertical;
+    transition: border-color 0.2s;
+  }
+  textarea:focus { outline: none; border-color: #4a6cf7; }
+  .row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-top: 12px;
+  }
+  input[type="date"] {
+    padding: 8px 12px;
+    border: 2px solid #e0e0e0;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-family: inherit;
+  }
+  input[type="date"]:focus { outline: none; border-color: #4a6cf7; }
+  button {
+    padding: 8px 20px;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.1s;
+  }
+  button:active { transform: scale(0.97); }
+  .btn-primary {
+    background: #4a6cf7;
+    color: #fff;
+    font-weight: 600;
+  }
+  .btn-primary:hover { background: #3a5ce5; }
+  .btn-secondary {
+    background: #e8ecf1;
+    color: #333;
+  }
+  .btn-secondary:hover { background: #dce1e8; }
+  .btn-small {
+    padding: 5px 12px;
+    font-size: 0.8rem;
+  }
+
+  /* Results */
+  .result-group {
+    margin-bottom: 14px;
+  }
+  .result-group:last-child { margin-bottom: 0; }
+  .result-label {
+    font-weight: 700;
+    font-size: 1rem;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .result-label .count {
+    background: #4a6cf7;
+    color: #fff;
+    border-radius: 12px;
+    padding: 1px 8px;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .result-label.special .count { background: #f59e0b; }
+  .result-names {
+    color: #555;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    padding-left: 4px;
+  }
+  #results { display: none; }
+  #results.show { display: block; }
+  .result-date {
+    text-align: center;
+    font-size: 1rem;
+    color: #666;
+    margin-bottom: 14px;
+    font-weight: 500;
+  }
+
+  /* Modal */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: 100;
+    justify-content: center;
+    align-items: center;
+  }
+  .modal-overlay.show { display: flex; }
+  .modal {
+    background: #fff;
+    border-radius: 12px;
+    padding: 24px;
+    width: 90%;
+    max-width: 500px;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .modal h2 { margin-bottom: 8px; font-size: 1.1rem; }
+  .modal p { font-size: 0.85rem; color: #888; margin-bottom: 12px; }
+  .modal textarea { height: 300px; }
+  .modal .row { justify-content: flex-end; }
+
+  .no-result {
+    text-align: center;
+    color: #999;
+    padding: 20px;
+    font-size: 0.95rem;
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>출첵 파서</h1>
+
+  <div class="card">
+    <div class="card-header">
+      <h2>채팅 내용 붙여넣기</h2>
+      <button class="btn-secondary btn-small" onclick="openModal()">팀원 관리</button>
+    </div>
+    <textarea id="chatInput" placeholder="두레이 채팅방에서 복사한 내용을 여기에 붙여넣으세요..."></textarea>
+    <div class="row">
+      <input type="date" id="dateInput">
+      <button class="btn-primary" onclick="analyze()">분석하기</button>
+    </div>
+  </div>
+
+  <div class="card" id="results">
+    <div class="card-header">
+      <h2>분석 결과</h2>
+      <button class="btn-secondary btn-small" onclick="copyResult()">복사</button>
+    </div>
+    <div class="result-date" id="resultDate"></div>
+    <div id="resultContent"></div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h2>팀원 관리</h2>
+    <p>한 줄에 한 명씩 이름을 입력하세요. 변경 시 자동 저장됩니다.</p>
+    <textarea id="memberInput"></textarea>
+    <div class="row">
+      <button class="btn-secondary" onclick="resetMembers()">기본값 복원</button>
+      <button class="btn-primary" onclick="saveMembers()">저장</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const DEFAULT_MEMBERS = [
+  '백종민','현범호','조형진','최인석','김충현','송대호','김동한','홍가희',
+  '윤현수','배재경','장대원','장재영','이준모','김혜지','김재현','김윤수',
+  '임동희','김민희','민종호','옥동현','박우승','양세나','전성아','최서윤',
+  '염승현','손혜진','이수빈','신연화','강윤영'
+];
+
+function getMembers() {
+  const saved = localStorage.getItem('checkin_members');
+  if (saved) {
+    try { return JSON.parse(saved); } catch(e) {}
+  }
+  return [...DEFAULT_MEMBERS];
+}
+
+function openModal() {
+  document.getElementById('memberInput').value = getMembers().join('\n');
+  document.getElementById('modal').classList.add('show');
+}
+
+function saveMembers() {
+  const text = document.getElementById('memberInput').value;
+  const members = text.split('\n').map(s => s.trim()).filter(Boolean);
+  localStorage.setItem('checkin_members', JSON.stringify(members));
+  document.getElementById('modal').classList.remove('show');
+}
+
+function resetMembers() {
+  localStorage.removeItem('checkin_members');
+  document.getElementById('memberInput').value = DEFAULT_MEMBERS.join('\n');
+}
+
+document.getElementById('modal').addEventListener('click', function(e) {
+  if (e.target === this) this.classList.remove('show');
+});
+
+// Set default date to today
+document.getElementById('dateInput').valueAsDate = new Date();
+
+// ===== Parsing Logic =====
+
+function analyze() {
+  const text = document.getElementById('chatInput').value.trim();
+  if (!text) return;
+
+  const dateStr = document.getElementById('dateInput').value;
+  const targetDate = new Date(dateStr);
+  const targetMonth = targetDate.getMonth() + 1;
+  const targetDay = targetDate.getDate();
+  const dayOfWeek = targetDate.getDay(); // 0=Sun, 5=Fri
+
+  const isFriday = dayOfWeek === 5;
+  const defaultHour = isFriday ? 8 : 10;
+
+  const members = getMembers();
+  const result = {}; // name -> { hour: number | null, note: string | null }
+
+  // Parse chat into sender blocks
+  const blocks = parseSenderBlocks(text);
+
+  // For each block, try to extract check-in info for the target date
+  for (const block of blocks) {
+    const name = block.name;
+    const info = parseCheckinInfo(block.lines, targetMonth, targetDay);
+    if (info) {
+      // Only track registered members, but also track unregistered ones found in chat
+      if (result[name]) {
+        // If already has info, keep the latest or merge
+        if (info.note) result[name].note = info.note;
+        if (info.hour !== null) result[name].hour = info.hour;
+      } else {
+        result[name] = info;
+      }
+    }
+  }
+
+  // Build output
+  const hourGroups = {}; // hour -> [names]
+  const specialList = []; // [{name, note}]
+  const allProcessed = new Set(Object.keys(result));
+
+  for (const [name, info] of Object.entries(result)) {
+    if (!members.includes(name)) continue; // skip non-members
+    if (info.note) {
+      specialList.push({ name, note: info.note });
+    } else if (info.hour !== null) {
+      const h = info.hour;
+      if (!hourGroups[h]) hourGroups[h] = [];
+      hourGroups[h].push(name);
+    }
+  }
+
+  // Unmentioned members get default hour
+  for (const name of members) {
+    if (!allProcessed.has(name)) {
+      if (!hourGroups[defaultHour]) hourGroups[defaultHour] = [];
+      hourGroups[defaultHour].push(name);
+    }
+  }
+
+  // Render results
+  renderResults(hourGroups, specialList, targetDate, isFriday, defaultHour);
+}
+
+function parseSenderBlocks(text) {
+  const lines = text.split('\n');
+  const blocks = [];
+  // Sender pattern: English Name(한글이름) with optional [status]
+  const senderRegex = /^[A-Za-z\s\(\)]+\(([\uac00-\ud7a3]+)\)/;
+
+  let currentName = null;
+  let currentLines = [];
+
+  for (const line of lines) {
+    const match = line.match(senderRegex);
+    if (match) {
+      // Save previous block
+      if (currentName) {
+        blocks.push({ name: currentName, lines: currentLines });
+      }
+      currentName = match[1];
+      currentLines = [];
+    } else if (currentName) {
+      currentLines.push(line);
+    }
+  }
+  // Save last block
+  if (currentName) {
+    blocks.push({ name: currentName, lines: currentLines });
+  }
+
+  return blocks;
+}
+
+function parseCheckinInfo(lines, targetMonth, targetDay) {
+  let hour = null;
+  let note = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    // Skip reactions (:emoji:), pure numbers, RE: replies, '작성' line
+    if (/^:[a-z_+]+:$/.test(trimmed)) continue;
+    if (/^\d+$/.test(trimmed)) continue;
+    if (/^RE:/.test(trimmed)) continue;
+    if (trimmed === '작성') continue;
+    if (/^오[전후]\s*\d/.test(trimmed)) continue; // timestamp line
+    if (/^\[.+\]$/.test(trimmed)) continue; // [status] line
+
+    // Check if line contains target date
+    const dateMatch = trimmed.match(/(\d{1,2})월\s*(\d{1,2})일/);
+    if (!dateMatch) continue;
+
+    const msgMonth = parseInt(dateMatch[1]);
+    const msgDay = parseInt(dateMatch[2]);
+    if (msgMonth !== targetMonth || msgDay !== targetDay) continue;
+
+    // Found a line for target date - check for admin summary (N출 N명)
+    if (/\d+출\s*\d+명/.test(trimmed)) continue;
+
+    // Check for 퇴사 (joke)
+    if (/퇴사/.test(trimmed)) continue;
+
+    // Check for special notes
+    const noteMatch = trimmed.match(/(연차|병가|공가|반차|오전반차|오후반차)/);
+    if (noteMatch) {
+      note = noteMatch[1];
+      return { hour: null, note };
+    }
+
+    // Check for check-in hour
+    const hourMatch = trimmed.match(/(\d{1,2})\s*(출근|출)\s*(입니다|합니다)?/);
+    if (hourMatch) {
+      hour = parseInt(hourMatch[1]);
+      return { hour, note: null };
+    }
+  }
+
+  return hour !== null || note !== null ? { hour, note } : null;
+}
+
+function renderResults(hourGroups, specialList, targetDate, isFriday, defaultHour) {
+  const resultsEl = document.getElementById('results');
+  const contentEl = document.getElementById('resultContent');
+  const dateEl = document.getElementById('resultDate');
+
+  const dayNames = ['일','월','화','수','목','금','토'];
+  const dayName = dayNames[targetDate.getDay()];
+  const m = targetDate.getMonth() + 1;
+  const d = targetDate.getDate();
+  dateEl.textContent = `${m}월 ${d}일 (${dayName}) / 기본 출근: ${defaultHour}시`;
+
+  let html = '';
+  const hours = [8, 9, 10];
+
+  for (const h of hours) {
+    const names = hourGroups[h] || [];
+    if (names.length === 0) continue;
+    html += `<div class="result-group">
+      <div class="result-label">${h}시 출근 <span class="count">${names.length}명</span></div>
+      <div class="result-names">${names.join(', ')}</div>
+    </div>`;
+  }
+
+  // Other hours (unlikely but just in case)
+  for (const [h, names] of Object.entries(hourGroups)) {
+    if (hours.includes(parseInt(h))) continue;
+    html += `<div class="result-group">
+      <div class="result-label">${h}시 출근 <span class="count">${names.length}명</span></div>
+      <div class="result-names">${names.join(', ')}</div>
+    </div>`;
+  }
+
+  if (specialList.length > 0) {
+    const items = specialList.map(s => `${s.name}(${s.note})`).join(', ');
+    html += `<div class="result-group">
+      <div class="result-label special">특이사항 <span class="count">${specialList.length}명</span></div>
+      <div class="result-names">${items}</div>
+    </div>`;
+  }
+
+  if (!html) {
+    html = '<div class="no-result">분석 가능한 메시지가 없습니다.</div>';
+  }
+
+  contentEl.innerHTML = html;
+  resultsEl.classList.add('show');
+}
+
+function copyResult() {
+  const dateText = document.getElementById('resultDate').textContent;
+  const groups = document.querySelectorAll('.result-group');
+  let text = dateText + '\n\n';
+  groups.forEach(g => {
+    const label = g.querySelector('.result-label').textContent.trim();
+    const names = g.querySelector('.result-names').textContent.trim();
+    text += label + ': ' + names + '\n';
+  });
+  navigator.clipboard.writeText(text.trim()).then(() => {
+    const btn = document.querySelector('#results .btn-small');
+    const orig = btn.textContent;
+    btn.textContent = '복사됨!';
+    setTimeout(() => btn.textContent = orig, 1500);
+  });
+}
+</script>
+
+</body>
+</html>
