@@ -149,6 +149,13 @@
   .modal textarea { height: 300px; }
   .modal .row { justify-content: flex-end; }
 
+  .auto-label {
+    color: #4a6cf7;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .auto-label.hidden { display: none; }
+
   .no-result {
     text-align: center;
     color: #999;
@@ -170,6 +177,7 @@
     <textarea id="chatInput" placeholder="두레이 채팅방에서 복사한 내용을 여기에 붙여넣으세요..."></textarea>
     <div class="row">
       <input type="date" id="dateInput">
+      <span id="autoLabel" class="auto-label">(자동)</span>
       <button class="btn-primary" onclick="analyze()">분석하기</button>
     </div>
   </div>
@@ -236,6 +244,46 @@ document.getElementById('modal').addEventListener('click', function(e) {
 
 // Set default date to today
 document.getElementById('dateInput').valueAsDate = new Date();
+
+// Auto-detect date from pasted chat content
+let isAutoDate = true;
+
+document.getElementById('chatInput').addEventListener('input', function() {
+  const detected = detectDateFromChat(this.value);
+  if (detected) {
+    document.getElementById('dateInput').valueAsDate = detected;
+    isAutoDate = true;
+    document.getElementById('autoLabel').classList.remove('hidden');
+  }
+});
+
+// Manual date change removes auto label
+document.getElementById('dateInput').addEventListener('change', function() {
+  isAutoDate = false;
+  document.getElementById('autoLabel').classList.add('hidden');
+});
+
+function detectDateFromChat(text) {
+  // Find the first date separator: "2026.03.25 수요일"
+  const dateSepRegex = /(\d{4})\.(\d{2})\.(\d{2})\s/g;
+  let firstDate = null;
+
+  let match;
+  while ((match = dateSepRegex.exec(text)) !== null) {
+    const d = new Date(parseInt(match[1]), parseInt(match[2]) - 1, parseInt(match[3]));
+    if (!firstDate || d < firstDate) {
+      firstDate = d;
+    }
+  }
+
+  if (firstDate) {
+    // Target date = first date separator + 1 day
+    const target = new Date(firstDate);
+    target.setDate(target.getDate() + 1);
+    return target;
+  }
+  return null;
+}
 
 // ===== Parsing Logic =====
 
