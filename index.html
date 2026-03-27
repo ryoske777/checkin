@@ -13,7 +13,7 @@
     min-height: 100vh;
     padding: 20px;
   }
-  .container { max-width: 800px; margin: 0 auto; }
+  .container { max-width: 960px; margin: 0 auto; }
   h1 {
     text-align: center;
     font-size: 1.6rem;
@@ -78,10 +78,67 @@
     font-size: 0.8rem;
   }
 
-  /* Results */
-  .result-group {
-    margin-bottom: 14px;
+  /* Seat Map */
+  .seat-section { margin-bottom: 16px; }
+  .seat-row {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 4px;
   }
+  .seat {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 4px;
+    border-radius: 6px;
+    text-align: center;
+    font-size: 0.8rem;
+    font-weight: 600;
+    border: 2px solid #e0e0e0;
+    background: #f8f9fb;
+  }
+  .seat-empty {
+    border: 2px dashed #ddd;
+    background: transparent;
+  }
+  .seat .seat-name {
+    display: block;
+    font-size: 0.85rem;
+    margin-bottom: 2px;
+  }
+  .seat .seat-status {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 400;
+  }
+  .seat-8 { background: #dcfce7; border-color: #86efac; }
+  .seat-9 { background: #dbeafe; border-color: #93c5fd; }
+  .seat-10 { background: #f3f4f6; border-color: #d1d5db; }
+  .seat-note { background: #fef3c7; border-color: #fcd34d; }
+
+  /* Legend */
+  .legend {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.8rem;
+    color: #555;
+  }
+  .legend-color {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid #ccc;
+  }
+
+  /* Results text */
+  .result-group { margin-bottom: 14px; }
   .result-group:last-child { margin-bottom: 0; }
   .result-label {
     font-weight: 700;
@@ -133,13 +190,13 @@
     border-radius: 12px;
     padding: 24px;
     width: 90%;
-    max-width: 500px;
+    max-width: 600px;
     max-height: 80vh;
     overflow-y: auto;
   }
   .modal h2 { margin-bottom: 8px; font-size: 1.1rem; }
   .modal p { font-size: 0.85rem; color: #888; margin-bottom: 12px; }
-  .modal textarea { height: 300px; }
+  .modal textarea { height: 300px; font-size: 0.85rem; }
   .modal .row { justify-content: flex-end; }
 
   /* Guide */
@@ -152,23 +209,17 @@
     margin-bottom: 12px;
   }
   .guide.show { display: block; }
-  .guide-step {
-    font-size: 0.9rem;
-    color: #333;
-    padding: 4px 0;
-  }
-  .guide-note {
-    font-size: 0.8rem;
-    color: #888;
-    padding: 2px 0;
-    margin-top: 4px;
-  }
+  .guide-step { font-size: 0.9rem; color: #333; padding: 4px 0; }
+  .guide-note { font-size: 0.8rem; color: #888; padding: 2px 0; margin-top: 4px; }
 
   .no-result {
     text-align: center;
     color: #999;
     padding: 20px;
     font-size: 0.95rem;
+  }
+  .section-divider {
+    height: 12px;
   }
 </style>
 </head>
@@ -182,7 +233,7 @@
       <h2>채팅 내용</h2>
       <div>
         <button class="btn-secondary btn-small" onclick="toggleGuide()">사용방법</button>
-        <button class="btn-secondary btn-small" onclick="openModal()">팀원 관리</button>
+        <button class="btn-secondary btn-small" onclick="openModal()">좌석 관리</button>
       </div>
     </div>
     <div class="guide" id="guide">
@@ -204,6 +255,13 @@
       <button class="btn-secondary btn-small" onclick="copyResult()">복사</button>
     </div>
     <div class="result-date" id="resultDate"></div>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-color" style="background:#dcfce7;border-color:#86efac"></div>8시</div>
+      <div class="legend-item"><div class="legend-color" style="background:#dbeafe;border-color:#93c5fd"></div>9시</div>
+      <div class="legend-item"><div class="legend-color" style="background:#f3f4f6;border-color:#d1d5db"></div>10시</div>
+      <div class="legend-item"><div class="legend-color" style="background:#fef3c7;border-color:#fcd34d"></div>특이사항</div>
+    </div>
+    <div id="seatMapResult"></div>
     <div id="resultContent"></div>
   </div>
 </div>
@@ -211,47 +269,83 @@
 <!-- Modal -->
 <div class="modal-overlay" id="modal">
   <div class="modal">
-    <h2>팀원 관리</h2>
-    <p>한 줄에 한 명씩 이름을 입력하세요. 변경 시 자동 저장됩니다.</p>
-    <textarea id="memberInput"></textarea>
+    <h2>좌석 배치 관리</h2>
+    <p>자리 배치대로 이름을 입력하세요. 콤마(,)로 같은 줄 구분, 빈 자리는 <b>-</b>, 섹션 구분은 <b>빈 줄</b>로 합니다.</p>
+    <textarea id="seatInput"></textarea>
     <div class="row">
-      <button class="btn-secondary" onclick="resetMembers()">기본값 복원</button>
-      <button class="btn-primary" onclick="saveMembers()">저장</button>
+      <button class="btn-secondary" onclick="resetSeats()">기본값 복원</button>
+      <button class="btn-primary" onclick="saveSeats()">저장</button>
     </div>
   </div>
 </div>
 
 <script>
-const DEFAULT_MEMBERS = [
-  '백종민','현범호','조형진','최인석','김충현','송대호','김동한','홍가희',
-  '윤현수','배재경','장대원','장재영','이준모','김혜지','김재현','김윤수',
-  '임동희','김민희','민종호','옥동현','박우승','양세나','전성아','최서윤',
-  '염승현','손혜진','이수빈','신연화','강윤영'
+// Seat map: array of sections, each section is array of rows, each row is array of names
+// '-' = empty seat, '' = empty seat
+const DEFAULT_SEAT_MAP = [
+  [
+    ['민종호','조형진','홍가희','송대호','윤현수','최서윤','-','-'],
+  ],
+  [
+    ['염승현','김민희','옥동현','김윤수','김충현','양세나','이수빈','김재현'],
+  ],
+  [
+    ['김혜지','장재영','손혜진','전성아','장대원','강윤영','현범호','배재경'],
+  ],
+  [
+    ['-','신연화','백종민','임동희','박우승','이준모','김동한','최인석'],
+  ],
 ];
 
-function getMembers() {
-  const saved = localStorage.getItem('checkin_members');
+function seatMapToText(map) {
+  return map.map(section =>
+    section.map(row => row.join(', ')).join('\n')
+  ).join('\n\n');
+}
+
+function textToSeatMap(text) {
+  const sections = text.split(/\n\s*\n/);
+  return sections.map(section => {
+    const rows = section.split('\n').filter(r => r.trim());
+    return rows.map(row => row.split(',').map(s => s.trim()));
+  });
+}
+
+function getSeatMap() {
+  const saved = localStorage.getItem('checkin_seatmap');
   if (saved) {
     try { return JSON.parse(saved); } catch(e) {}
   }
-  return [...DEFAULT_MEMBERS];
+  return JSON.parse(JSON.stringify(DEFAULT_SEAT_MAP));
+}
+
+function getMembersFromSeatMap(seatMap) {
+  const members = [];
+  for (const section of seatMap) {
+    for (const row of section) {
+      for (const name of row) {
+        if (name && name !== '-') members.push(name);
+      }
+    }
+  }
+  return members;
 }
 
 function openModal() {
-  document.getElementById('memberInput').value = getMembers().join('\n');
+  document.getElementById('seatInput').value = seatMapToText(getSeatMap());
   document.getElementById('modal').classList.add('show');
 }
 
-function saveMembers() {
-  const text = document.getElementById('memberInput').value;
-  const members = text.split('\n').map(s => s.trim()).filter(Boolean);
-  localStorage.setItem('checkin_members', JSON.stringify(members));
+function saveSeats() {
+  const text = document.getElementById('seatInput').value;
+  const map = textToSeatMap(text);
+  localStorage.setItem('checkin_seatmap', JSON.stringify(map));
   document.getElementById('modal').classList.remove('show');
 }
 
-function resetMembers() {
-  localStorage.removeItem('checkin_members');
-  document.getElementById('memberInput').value = DEFAULT_MEMBERS.join('\n');
+function resetSeats() {
+  localStorage.removeItem('checkin_seatmap');
+  document.getElementById('seatInput').value = seatMapToText(DEFAULT_SEAT_MAP);
 }
 
 function toggleGuide() {
@@ -267,7 +361,6 @@ document.getElementById('modal').addEventListener('click', function(e) {
 function nextBusinessDay(date) {
   const d = new Date(date);
   d.setDate(d.getDate() + 1);
-  // Skip Saturday(6) and Sunday(0)
   while (d.getDay() === 0 || d.getDay() === 6) {
     d.setDate(d.getDate() + 1);
   }
@@ -298,6 +391,7 @@ function analyze() {
 
   const targetDate = detectDateFromChat(text);
   if (!targetDate) {
+    document.getElementById('seatMapResult').innerHTML = '';
     document.getElementById('resultContent').innerHTML =
       '<div class="no-result">날짜 구분선(예: 2026.03.25 수요일)을 찾을 수 없습니다.</div>';
     document.getElementById('results').classList.add('show');
@@ -305,32 +399,28 @@ function analyze() {
   }
   const targetMonth = targetDate.getMonth() + 1;
   const targetDay = targetDate.getDate();
-  const dayOfWeek = targetDate.getDay(); // 0=Sun, 5=Fri
+  const dayOfWeek = targetDate.getDay();
 
   const isFriday = dayOfWeek === 5;
   const defaultHour = isFriday ? 8 : 10;
 
-  const members = getMembers();
-  const result = {}; // name -> { hour: number | null, note: string | null }
-  const weekendWork = {}; // dateKey -> { name -> { hour, note } }
+  const seatMap = getSeatMap();
+  const members = getMembersFromSeatMap(seatMap);
+  const result = {}; // name -> { hour, note }
+  const weekendWork = {};
 
-  // Parse chat into sender blocks
   const blocks = parseSenderBlocks(text);
 
-  // Collect weekend dates to check (Sat/Sun before target Monday)
   const weekendDates = [];
-  if (dayOfWeek === 1) { // Monday
-    const sat = new Date(targetDate);
-    sat.setDate(sat.getDate() - 2);
-    const sun = new Date(targetDate);
-    sun.setDate(sun.getDate() - 1);
+  if (dayOfWeek === 1) {
+    const sat = new Date(targetDate); sat.setDate(sat.getDate() - 2);
+    const sun = new Date(targetDate); sun.setDate(sun.getDate() - 1);
     weekendDates.push(sat, sun);
   }
 
   for (const block of blocks) {
     const name = block.name;
 
-    // Parse for target date
     const info = parseCheckinInfo(block.lines, targetMonth, targetDay, targetDate, block.chatDate);
     if (info) {
       if (result[name]) {
@@ -341,7 +431,6 @@ function analyze() {
       }
     }
 
-    // Parse for weekend work (only if target is Monday)
     for (const wd of weekendDates) {
       const wm = wd.getMonth() + 1;
       const wday = wd.getDate();
@@ -354,53 +443,70 @@ function analyze() {
     }
   }
 
-  // Build output
-  const hourGroups = {}; // hour -> [names]
-  const specialList = []; // [{name, note}]
+  // Build status map: name -> { hour, note, statusClass, statusText }
+  const statusMap = {};
   const allProcessed = new Set(Object.keys(result));
 
   for (const [name, info] of Object.entries(result)) {
     if (!members.includes(name)) continue;
+    const entry = { hour: info.hour, note: info.note };
     if (info.hour !== null && info.note) {
-      // Both hour and note (e.g. "8출 오후반차")
-      const h = info.hour;
-      if (!hourGroups[h]) hourGroups[h] = [];
-      hourGroups[h].push(name);
-      specialList.push({ name, note: info.note });
+      entry.statusClass = 'seat-' + info.hour;
+      entry.statusText = info.hour + '시 + ' + info.note;
     } else if (info.note) {
-      specialList.push({ name, note: info.note });
+      entry.statusClass = 'seat-note';
+      entry.statusText = info.note;
     } else if (info.hour !== null) {
-      const h = info.hour;
-      if (!hourGroups[h]) hourGroups[h] = [];
-      hourGroups[h].push(name);
+      entry.statusClass = 'seat-' + info.hour;
+      entry.statusText = info.hour + '시';
+    }
+    statusMap[name] = entry;
+  }
+
+  // Unmentioned = default hour
+  for (const name of members) {
+    if (!allProcessed.has(name)) {
+      statusMap[name] = {
+        hour: defaultHour,
+        note: null,
+        statusClass: 'seat-' + defaultHour,
+        statusText: defaultHour + '시',
+      };
     }
   }
 
-  // Unmentioned members get default hour
-  for (const name of members) {
-    if (!allProcessed.has(name)) {
+  // Build hourGroups and specialList for text summary
+  const hourGroups = {};
+  const specialList = [];
+  for (const [name, s] of Object.entries(statusMap)) {
+    if (s.hour !== null) {
+      if (!hourGroups[s.hour]) hourGroups[s.hour] = [];
+      hourGroups[s.hour].push(name);
+    }
+    if (s.note) {
+      specialList.push({ name, note: s.note });
+    }
+    if (s.hour === null && !s.note) {
+      // fallback
       if (!hourGroups[defaultHour]) hourGroups[defaultHour] = [];
       hourGroups[defaultHour].push(name);
     }
   }
 
-  // Render results
-  renderResults(hourGroups, specialList, targetDate, isFriday, defaultHour, weekendWork);
+  renderResults(seatMap, statusMap, hourGroups, specialList, targetDate, isFriday, defaultHour, weekendWork);
 }
 
 function parseSenderBlocks(text) {
   const lines = text.split('\n');
   const blocks = [];
   const senderRegex = /^[A-Za-z\s\(\)]+\(([\uac00-\ud7a3]+)\)/;
-  // Date separator: "2026.03.27 금요일"
   const dateSepRegex = /^(\d{4})\.(\d{2})\.(\d{2})\s/;
 
   let currentName = null;
   let currentLines = [];
-  let currentChatDate = null; // date from separator line
+  let currentChatDate = null;
 
   for (const line of lines) {
-    // Check for date separator line
     const dateSepMatch = line.match(dateSepRegex);
     if (dateSepMatch) {
       if (currentName) {
@@ -446,18 +552,15 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
 
   const isSameDay = sameDate(chatDate, targetDate);
 
-  // For dateless messages: which chatDates should map to targetDate?
   let isLeadUpDay = false;
   if (chatDate && targetDate && !isSameDay) {
     const targetDow = targetDate.getDay();
     if (targetDow === 1) {
-      // Monday: accept Fri evening, Sat, Sun, Mon morning
       const fri = new Date(targetDate); fri.setDate(fri.getDate() - 3);
       const sat = new Date(targetDate); sat.setDate(sat.getDate() - 2);
       const sun = new Date(targetDate); sun.setDate(sun.getDate() - 1);
       isLeadUpDay = sameDate(chatDate, fri) || sameDate(chatDate, sat) || sameDate(chatDate, sun);
     } else {
-      // Weekday: accept previous day
       const prev = new Date(targetDate); prev.setDate(prev.getDate() - 1);
       isLeadUpDay = sameDate(chatDate, prev);
     }
@@ -466,16 +569,13 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
   for (const line of lines) {
     const trimmed = line.trim();
 
-    // Skip reactions (:emoji:), pure numbers, '작성' line
     if (/^:[a-z_+]+:$/.test(trimmed)) continue;
     if (/^\d+$/.test(trimmed)) continue;
     if (trimmed === '작성') continue;
-    if (/^\[.+\]$/.test(trimmed)) continue; // [status] line
+    if (/^\[.+\]$/.test(trimmed)) continue;
 
-    // RE: lines - strip prefix and parse the content
     const reStripped = trimmed.startsWith('RE:') ? trimmed.slice(3).trim() : trimmed;
 
-    // Track send time (오전/오후 H:MM)
     const timeMatch = trimmed.match(/^(오전|오후)\s*(\d{1,2}):(\d{2})$/);
     if (timeMatch) {
       let h = parseInt(timeMatch[2]);
@@ -485,7 +585,6 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
       continue;
     }
 
-    // Check if line contains explicit date
     const dateMatch = reStripped.match(/(\d{1,2})월\s*(\d{1,2})일/);
     let dateMatches = false;
 
@@ -494,7 +593,6 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
       const msgDay = parseInt(dateMatch[2]);
       dateMatches = (msgMonth === targetMonth && msgDay === targetDay);
     } else if (!weekendOnly) {
-      // No date in message: use chatDate context
       if (isSameDay) {
         dateMatches = true;
       } else if (isLeadUpDay) {
@@ -508,20 +606,14 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
 
     if (!dateMatches) continue;
 
-    // Admin summary (N출 N명) - skip
     if (/\d+출\s*\d+명/.test(reStripped)) continue;
-
-    // 퇴사 joke - skip
     if (/퇴사/.test(reStripped)) continue;
 
-    // Parse hour and note from same line (e.g. "8출 오후반차")
     const hourMatch = reStripped.match(/(\d{1,2})\s*(출근|출)/);
     const noteMatch = reStripped.match(/(연차|병가|공가|오전반차|오후반차|반차)/);
 
-    // Skip if neither found
     if (!hourMatch && !noteMatch) continue;
 
-    // Overwrite with latest match (corrections win)
     if (hourMatch) hour = parseInt(hourMatch[1]);
     if (noteMatch) note = noteMatch[1];
   }
@@ -529,8 +621,9 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
   return hour !== null || note !== null ? { hour, note } : null;
 }
 
-function renderResults(hourGroups, specialList, targetDate, isFriday, defaultHour, weekendWork) {
+function renderResults(seatMap, statusMap, hourGroups, specialList, targetDate, isFriday, defaultHour, weekendWork) {
   const resultsEl = document.getElementById('results');
+  const seatEl = document.getElementById('seatMapResult');
   const contentEl = document.getElementById('resultContent');
   const dateEl = document.getElementById('resultDate');
 
@@ -540,6 +633,33 @@ function renderResults(hourGroups, specialList, targetDate, isFriday, defaultHou
   const d = targetDate.getDate();
   dateEl.textContent = `${m}월 ${d}일 (${dayName})`;
 
+  // Render seat map
+  let seatHtml = '';
+  for (let si = 0; si < seatMap.length; si++) {
+    if (si > 0) seatHtml += '<div class="section-divider"></div>';
+    seatHtml += '<div class="seat-section">';
+    for (const row of seatMap[si]) {
+      seatHtml += '<div class="seat-row">';
+      for (const name of row) {
+        if (!name || name === '-') {
+          seatHtml += '<div class="seat seat-empty"></div>';
+        } else {
+          const s = statusMap[name];
+          const cls = s ? s.statusClass : 'seat-10';
+          const txt = s ? s.statusText : defaultHour + '시';
+          seatHtml += `<div class="seat ${cls}">
+            <span class="seat-name">${name}</span>
+            <span class="seat-status">${txt}</span>
+          </div>`;
+        }
+      }
+      seatHtml += '</div>';
+    }
+    seatHtml += '</div>';
+  }
+  seatEl.innerHTML = seatHtml;
+
+  // Render text summary
   let html = '';
   const hours = [8, 9, 10];
 
@@ -552,7 +672,6 @@ function renderResults(hourGroups, specialList, targetDate, isFriday, defaultHou
     </div>`;
   }
 
-  // Other hours (unlikely but just in case)
   for (const [h, names] of Object.entries(hourGroups)) {
     if (hours.includes(parseInt(h))) continue;
     html += `<div class="result-group">
@@ -569,9 +688,7 @@ function renderResults(hourGroups, specialList, targetDate, isFriday, defaultHou
     </div>`;
   }
 
-  // Weekend work section
   if (weekendWork && Object.keys(weekendWork).length > 0) {
-    const dayNames = ['일','월','화','수','목','금','토'];
     for (const [key, data] of Object.entries(weekendWork)) {
       const wd = data.date;
       const wDayName = dayNames[wd.getDay()];
@@ -590,7 +707,7 @@ function renderResults(hourGroups, specialList, targetDate, isFriday, defaultHou
     }
   }
 
-  if (!html) {
+  if (!html && !seatHtml) {
     html = '<div class="no-result">분석 가능한 메시지가 없습니다.</div>';
   }
 
