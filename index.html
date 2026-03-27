@@ -212,6 +212,29 @@
   .guide-step { font-size: 0.9rem; color: #333; padding: 4px 0; }
   .guide-note { font-size: 0.8rem; color: #888; padding: 2px 0; margin-top: 4px; }
 
+  /* Leave entries */
+  .leave-entry {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    background: #f8f9fb;
+    border-radius: 6px;
+    margin-bottom: 6px;
+    font-size: 0.85rem;
+  }
+  .leave-entry .leave-info { color: #333; }
+  .leave-entry .leave-dates { color: #888; font-size: 0.8rem; }
+  .leave-del {
+    background: none;
+    border: none;
+    color: #ef4444;
+    cursor: pointer;
+    font-size: 0.85rem;
+    padding: 2px 6px;
+  }
+  .leave-empty { color: #999; font-size: 0.85rem; padding: 8px 0; }
+
   .no-result {
     text-align: center;
     color: #999;
@@ -233,6 +256,7 @@
       <h2>채팅 내용</h2>
       <div>
         <button class="btn-secondary btn-small" onclick="toggleGuide()">사용방법</button>
+        <button class="btn-secondary btn-small" onclick="openLeaveModal()">기간 근태</button>
         <button class="btn-secondary btn-small" onclick="openModal()">좌석 관리</button>
       </div>
     </div>
@@ -266,7 +290,35 @@
   </div>
 </div>
 
-<!-- Modal -->
+<!-- Leave Modal -->
+<div class="modal-overlay" id="leaveModal">
+  <div class="modal">
+    <h2>기간 근태 관리</h2>
+    <p>장기 연차/병가 등을 등록하세요. 분석 시 자동 반영됩니다.</p>
+    <div id="leaveList"></div>
+    <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+      <select id="leaveName" style="padding:6px 8px; border:2px solid #e0e0e0; border-radius:6px; font-size:0.85rem">
+      </select>
+      <select id="leaveType" style="padding:6px 8px; border:2px solid #e0e0e0; border-radius:6px; font-size:0.85rem">
+        <option value="연차">연차</option>
+        <option value="병가">병가</option>
+        <option value="공가">공가</option>
+        <option value="반차">반차</option>
+        <option value="오전반차">오전반차</option>
+        <option value="오후반차">오후반차</option>
+      </select>
+      <input type="date" id="leaveFrom" style="padding:6px 8px; border:2px solid #e0e0e0; border-radius:6px; font-size:0.85rem">
+      <span style="font-size:0.85rem">~</span>
+      <input type="date" id="leaveTo" style="padding:6px 8px; border:2px solid #e0e0e0; border-radius:6px; font-size:0.85rem">
+      <button class="btn-primary btn-small" onclick="addLeave()">추가</button>
+    </div>
+    <div class="row">
+      <button class="btn-secondary" onclick="closeLeaveModal()">닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- Seat Modal -->
 <div class="modal-overlay" id="modal">
   <div class="modal">
     <h2>좌석 배치 관리</h2>
@@ -346,6 +398,90 @@ function saveSeats() {
 function resetSeats() {
   localStorage.removeItem('checkin_seatmap');
   document.getElementById('seatInput').value = seatMapToText(DEFAULT_SEAT_MAP);
+}
+
+// ===== Leave (기간 근태) =====
+
+function getLeaves() {
+  const saved = localStorage.getItem('checkin_leaves');
+  if (saved) {
+    try { return JSON.parse(saved); } catch(e) {}
+  }
+  return [];
+}
+
+function saveLeaves(leaves) {
+  localStorage.setItem('checkin_leaves', JSON.stringify(leaves));
+}
+
+function openLeaveModal() {
+  // Populate name dropdown
+  const sel = document.getElementById('leaveName');
+  const members = getMembersFromSeatMap(getSeatMap());
+  sel.innerHTML = members.map(n => `<option value="${n}">${n}</option>`).join('');
+  renderLeaveList();
+  document.getElementById('leaveModal').classList.add('show');
+}
+
+function closeLeaveModal() {
+  document.getElementById('leaveModal').classList.remove('show');
+}
+
+document.getElementById('leaveModal').addEventListener('click', function(e) {
+  if (e.target === this) this.classList.remove('show');
+});
+
+function renderLeaveList() {
+  const leaves = getLeaves();
+  const el = document.getElementById('leaveList');
+  if (leaves.length === 0) {
+    el.innerHTML = '<div class="leave-empty">등록된 기간 근태가 없습니다.</div>';
+    return;
+  }
+  el.innerHTML = leaves.map((l, i) =>
+    `<div class="leave-entry">
+      <div>
+        <span class="leave-info">${l.name} - ${l.type}</span>
+        <span class="leave-dates">(${l.from} ~ ${l.to})</span>
+      </div>
+      <button class="leave-del" onclick="deleteLeave(${i})">삭제</button>
+    </div>`
+  ).join('');
+}
+
+function addLeave() {
+  const name = document.getElementById('leaveName').value;
+  const type = document.getElementById('leaveType').value;
+  const from = document.getElementById('leaveFrom').value;
+  const to = document.getElementById('leaveTo').value;
+  if (!name || !from || !to) return;
+  const leaves = getLeaves();
+  leaves.push({ name, type, from, to });
+  saveLeaves(leaves);
+  renderLeaveList();
+  document.getElementById('leaveFrom').value = '';
+  document.getElementById('leaveTo').value = '';
+}
+
+function deleteLeave(idx) {
+  const leaves = getLeaves();
+  leaves.splice(idx, 1);
+  saveLeaves(leaves);
+  renderLeaveList();
+}
+
+function getLeaveForDate(name, targetDate) {
+  const leaves = getLeaves();
+  const t = targetDate.getTime();
+  for (const l of leaves) {
+    if (l.name !== name) continue;
+    const from = new Date(l.from + 'T00:00:00');
+    const to = new Date(l.to + 'T23:59:59');
+    if (t >= from.getTime() && t <= to.getTime()) {
+      return l.type;
+    }
+  }
+  return null;
 }
 
 function toggleGuide() {
@@ -463,15 +599,25 @@ function analyze() {
     statusMap[name] = entry;
   }
 
-  // Unmentioned = default hour
+  // Unmentioned: check 기간 근태 first, then default hour
   for (const name of members) {
     if (!allProcessed.has(name)) {
-      statusMap[name] = {
-        hour: defaultHour,
-        note: null,
-        statusClass: 'seat-' + defaultHour,
-        statusText: defaultHour + '시',
-      };
+      const leaveType = getLeaveForDate(name, targetDate);
+      if (leaveType) {
+        statusMap[name] = {
+          hour: null,
+          note: leaveType,
+          statusClass: 'seat-note',
+          statusText: leaveType,
+        };
+      } else {
+        statusMap[name] = {
+          hour: defaultHour,
+          note: null,
+          statusClass: 'seat-' + defaultHour,
+          statusText: defaultHour + '시',
+        };
+      }
     }
   }
 
