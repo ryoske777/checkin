@@ -592,6 +592,11 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
       const msgMonth = parseInt(dateMatch[1]);
       const msgDay = parseInt(dateMatch[2]);
       dateMatches = (msgMonth === targetMonth && msgDay === targetDay);
+    } else if (chatDate && /금일/.test(reStripped)) {
+      // "금일" → chatDate(당일) 날짜로 매칭
+      const chatMonth = chatDate.getMonth() + 1;
+      const chatDay = chatDate.getDate();
+      dateMatches = (chatMonth === targetMonth && chatDay === targetDay);
     } else if (!weekendOnly) {
       if (isSameDay) {
         dateMatches = true;
@@ -599,7 +604,13 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
         if (sameDate(chatDate, targetDate)) {
           dateMatches = lastSendTime !== null && lastSendTime < 10;
         } else {
-          dateMatches = true;
+          const chatDow = chatDate.getDay();
+          if (chatDow === 5) {
+            // 금요일 dateless → 10시 이후만 월요일로
+            dateMatches = lastSendTime !== null && lastSendTime >= 10;
+          } else {
+            dateMatches = true; // 토/일 → 항상 월요일
+          }
         }
       }
     }
@@ -608,6 +619,7 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
 
     if (/\d+출\s*\d+명/.test(reStripped)) continue;
     if (/퇴사/.test(reStripped)) continue;
+    if (/퇴근/.test(reStripped)) continue;
 
     const hourMatch = reStripped.match(/(\d{1,2})\s*(출근|출)/);
     const noteMatch = reStripped.match(/(연차|병가|공가|오전반차|오후반차|반차)/);
