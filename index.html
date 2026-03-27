@@ -587,7 +587,7 @@ function analyze() {
     if (!members.includes(name)) continue;
     const entry = { hour: info.hour, note: info.note };
     if (info.hour !== null && info.note) {
-      entry.statusClass = 'seat-' + info.hour;
+      entry.statusClass = 'seat-note';
       entry.statusText = info.hour + '시 + ' + info.note;
     } else if (info.note) {
       entry.statusClass = 'seat-note';
