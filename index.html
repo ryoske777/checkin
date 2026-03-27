@@ -592,6 +592,10 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
       const msgMonth = parseInt(dateMatch[1]);
       const msgDay = parseInt(dateMatch[2]);
       dateMatches = (msgMonth === targetMonth && msgDay === targetDay);
+    } else if (/\d{1,2}월\s*\d/.test(reStripped)) {
+      // 날짜가 있지만 정규식 매칭 실패 (범위 형태 등: "3월 30 ~ 31일")
+      // dateless로 빠지면 안 되므로 스킵
+      dateMatches = false;
     } else if (chatDate && /금일/.test(reStripped)) {
       // "금일" → chatDate(당일) 날짜로 매칭
       const chatMonth = chatDate.getMonth() + 1;
