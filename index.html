@@ -234,6 +234,7 @@
     padding: 2px 6px;
   }
   .leave-empty { color: #999; font-size: 0.85rem; padding: 8px 0; }
+  .leave-auto-badge { font-size: 0.7rem; background: #e0f2fe; color: #0369a1; border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
 
   .no-result {
     text-align: center;
@@ -250,6 +251,7 @@
 
 <div class="container">
   <h1>근태 인원 체크</h1>
+  <div style="text-align:center; font-size:0.85rem; color:#888; margin-top:-12px; margin-bottom:12px;" id="todayBadge"></div>
 
   <div class="card">
     <div class="card-header">
@@ -428,6 +430,16 @@ function closeLeaveModal() {
   document.getElementById('leaveModal').classList.remove('show');
 }
 
+// Show today's date in the page header
+(function() {
+  const today = new Date();
+  const dayNames = ['일','월','화','수','목','금','토'];
+  const badge = document.getElementById('todayBadge');
+  if (badge) {
+    badge.textContent = `오늘: ${today.getFullYear()}년 ${today.getMonth()+1}월 ${today.getDate()}일 (${dayNames[today.getDay()]})`;
+  }
+})();
+
 document.getElementById('leaveModal').addEventListener('click', function(e) {
   if (e.target === this) this.classList.remove('show');
 });
@@ -443,6 +455,7 @@ function renderLeaveList() {
     `<div class="leave-entry">
       <div>
         <span class="leave-info">${l.name} - ${l.type}</span>
+        ${l.auto ? '<span class="leave-auto-badge">자동</span>' : ''}
         <span class="leave-dates">(${l.from} ~ ${l.to})</span>
       </div>
       <button class="leave-del" onclick="deleteLeave(${i})">삭제</button>
@@ -553,6 +566,40 @@ function analyze() {
     const sat = new Date(targetDate); sat.setDate(sat.getDate() - 2);
     const sun = new Date(targetDate); sun.setDate(sun.getDate() - 1);
     weekendDates.push(sat, sun);
+  }
+
+  // Auto-detect date-range leave patterns from chat and save to leaves storage
+  const chatYear = targetDate.getFullYear();
+  for (const block of blocks) {
+    if (!block.name) continue;
+    for (const line of block.lines) {
+      const stripped = line.trim().startsWith('RE:') ? line.trim().slice(3).trim() : line.trim();
+      // Pattern: "N월 M일 ~ N월 M일 대체 휴무" or "N월 M일 ~ M일 연차" etc.
+      const rangeMatch = stripped.match(
+        /(\d{1,2})월\s*(\d{1,2})일\s*~\s*(?:(\d{1,2})월\s*)?(\d{1,2})일[^]*?(연차|병가|공가|오전반차|오후반차|반차|대체\s*휴무|대휴)/
+      );
+      if (!rangeMatch) continue;
+      const fromMonth = parseInt(rangeMatch[1]);
+      const fromDay   = parseInt(rangeMatch[2]);
+      const toMonth   = rangeMatch[3] ? parseInt(rangeMatch[3]) : fromMonth;
+      const toDay     = parseInt(rangeMatch[4]);
+      const rawType   = rangeMatch[5];
+      const leaveType = /대체\s*휴무/.test(rawType) ? '대휴' : rawType;
+
+      const pad = n => String(n).padStart(2, '0');
+      const fromStr = `${chatYear}-${pad(fromMonth)}-${pad(fromDay)}`;
+      const toStr   = `${chatYear}-${pad(toMonth)}-${pad(toDay)}`;
+
+      // Save only if not already registered (same name, type, from, to)
+      const leaves = getLeaves();
+      const exists = leaves.some(l =>
+        l.name === block.name && l.type === leaveType && l.from === fromStr && l.to === toStr
+      );
+      if (!exists) {
+        leaves.push({ name: block.name, type: leaveType, from: fromStr, to: toStr, auto: true });
+        saveLeaves(leaves);
+      }
+    }
   }
 
   for (const block of blocks) {
@@ -773,12 +820,12 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
     if (/퇴근/.test(reStripped)) continue;
 
     const hourMatch = reStripped.match(/(\d{1,2})\s*(출근|출)/);
-    const noteMatch = reStripped.match(/(연차|병가|공가|오전반차|오후반차|반차|대휴)/);
+    const noteMatch = reStripped.match(/(연차|병가|공가|오전반차|오후반차|반차|대체\s*휴무|대휴)/);
 
     if (!hourMatch && !noteMatch) continue;
 
     if (hourMatch) hour = parseInt(hourMatch[1]);
-    if (noteMatch) note = noteMatch[1];
+    if (noteMatch) note = /대체\s*휴무/.test(noteMatch[1]) ? '대휴' : noteMatch[1];
   }
 
   return hour !== null || note !== null ? { hour, note } : null;
