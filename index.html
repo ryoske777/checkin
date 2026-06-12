@@ -773,12 +773,12 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
     if (/퇴근/.test(reStripped)) continue;
 
     const hourMatch = reStripped.match(/(\d{1,2})\s*(출근|출)/);
-    const noteMatch = reStripped.match(/(연차|병가|공가|오전반차|오후반차|반차|대휴)/);
+    const noteMatch = reStripped.match(/(연차|병가|공가|오전반차|오후반차|반차|대체휴무|대휴)/);
 
     if (!hourMatch && !noteMatch) continue;
 
     if (hourMatch) hour = parseInt(hourMatch[1]);
-    if (noteMatch) note = noteMatch[1];
+    if (noteMatch) note = noteMatch[1] === '대체휴무' ? '대휴' : noteMatch[1];
   }
 
   return hour !== null || note !== null ? { hour, note } : null;
