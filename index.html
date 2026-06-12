@@ -306,6 +306,7 @@
         <option value="반차">반차</option>
         <option value="오전반차">오전반차</option>
         <option value="오후반차">오후반차</option>
+        <option value="대휴">대휴</option>
       </select>
       <input type="date" id="leaveFrom" style="padding:6px 8px; border:2px solid #e0e0e0; border-radius:6px; font-size:0.85rem">
       <span style="font-size:0.85rem">~</span>
@@ -772,7 +773,7 @@ function parseCheckinInfo(lines, targetMonth, targetDay, targetDate, chatDate, w
     if (/퇴근/.test(reStripped)) continue;
 
     const hourMatch = reStripped.match(/(\d{1,2})\s*(출근|출)/);
-    const noteMatch = reStripped.match(/(연차|병가|공가|오전반차|오후반차|반차)/);
+    const noteMatch = reStripped.match(/(연차|병가|공가|오전반차|오후반차|반차|대휴)/);
 
     if (!hourMatch && !noteMatch) continue;
 
