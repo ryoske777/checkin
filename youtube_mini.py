@@ -31,11 +31,14 @@ import json
 import os
 import re
 import threading
+import time
 
 import webview
 
 BASE_W, BASE_H = 194, 110
-DEFAULT_URL = "https://www.youtube.com/watch?v=jfKfPfyJRdk"
+# 라이브 스트림은 종료되면 '실시간 스트림 녹화를 볼 수 없습니다' 오류가
+# 나므로 기본 시작 영상은 항상 재생 가능한 일반 영상으로 둔다.
+DEFAULT_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 
 PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".yt_mini_profile")
 CONFIG_PATH = os.path.join(PROFILE_DIR, "config.json")
@@ -98,6 +101,7 @@ BROWSER_HOOK_JS = r"""
 # 미니 창(유튜브 시청 페이지)에 주입: 영상만 보이게 하고 자체 UI 를 얹는다.
 MINI_HOOK_JS = r"""
 (function(){
+ try {
   if (window.__miniHooked) return; window.__miniHooked = true;
   var cfg = __CFG__;
   var onTop = cfg.onTop !== false;
@@ -194,14 +198,16 @@ MINI_HOOK_JS = r"""
 
   function buildMenu(){
     var v = vid();
+    // 주의: 유튜브는 Trusted Types(CSP)를 강제하므로 innerHTML 을 쓰면
+    // 예외가 발생한다. DOM API 로만 구성할 것. (이모지도 BMP 문자만 사용)
     var items = [
       [(v && v.paused) ? '▶ 재생' : '⏸ 일시정지', togglePlay],
-      [(v && v.muted) ? '🔊 소리 켜기' : '🔇 음소거', toggleMute],
+      [(v && v.muted) ? '소리 켜기' : '음소거', toggleMute],
       ['⏭ 다음 영상', nextVideo],
       ['⏮ 이전 영상', prevVideo],
-      ['🔗 URL 열기', openUrl],
-      ['🏠 YT 홈', function(){ var a = api(); if (a) a.open_browser('home'); }],
-      ['📺 구독 목록', function(){ var a = api(); if (a) a.open_browser('subs'); }],
+      ['URL 열기', openUrl],
+      ['YT 홈', function(){ var a = api(); if (a) a.open_browser('home'); }],
+      ['구독 목록', function(){ var a = api(); if (a) a.open_browser('subs'); }],
       [(onTop ? '✓ ' : '') + '항상 위', toggleOnTop],
       ['크기 2배', function(){ var a = api(); if (a) a.set_scale(2); }],
       ['기본 크기', function(){ var a = api(); if (a) a.set_scale(1); }],
@@ -209,7 +215,7 @@ MINI_HOOK_JS = r"""
       ['— 최소화', function(){ var a = api(); if (a) a.minimize(); }],
       ['✕ 종료', function(){ var a = api(); if (a) a.quit(); }]
     ];
-    menu.innerHTML = '';
+    while (menu.firstChild) menu.removeChild(menu.firstChild);
     items.forEach(function(it){
       var d = document.createElement('div');
       d.className = 'mi'; d.textContent = it[0];
@@ -301,11 +307,26 @@ MINI_HOOK_JS = r"""
       });
     }
 
+    // 재생 불가 영상(종료된 라이브 등)이면 안내
+    var errEl = document.querySelector('#movie_player .ytp-error');
+    if (errEl && !window.__miniErrToasted){
+      window.__miniErrToasted = true;
+      toast('재생 불가 영상 — 우클릭 메뉴에서 URL/홈으로 이동');
+    }
+
     if (location.href.indexOf('/watch') >= 0){
       var a = api(); if (a) a.save_ui_state({lastUrl: location.href});
     }
     window.dispatchEvent(new Event('resize'));   // 플레이어 크기 갱신
   }, 2000);
+ } catch (err) {
+  // 실패 시 가드를 풀어 파이썬 쪽 재주입 루프가 다시 시도하게 한다
+  window.__miniHooked = false;
+  try {
+    if (window.pywebview && window.pywebview.api)
+      window.pywebview.api.log('mini hook error: ' + ((err && err.stack) || err));
+  } catch (e) {}
+ }
 })();
 """
 
@@ -332,6 +353,10 @@ class Api:
         if isinstance(state, dict):
             self._config.update(state)
             self._persist_later()
+
+    def log(self, msg):
+        """주입 스크립트의 오류를 콘솔에서 확인할 수 있게 출력."""
+        print("[mini]", msg)
 
     def on_geometry_change(self, *args):
         """창 크기/위치 변경 시 저장 (resized/moved 이벤트)."""
@@ -438,6 +463,17 @@ class Api:
             pass
 
 
+def _keep_mini_injected(api):
+    """미니 UI 주입 자가치유 루프.
+
+    loaded 이벤트를 놓치거나 주입 스크립트가 실패해도 2초마다 재시도한다.
+    스크립트 자체가 __miniHooked 가드로 멱등이라 중복 주입은 무해하다.
+    """
+    while True:
+        api._inject_mini_hook()
+        time.sleep(2)
+
+
 def main():
     # 사용자 클릭 없이도 소리 있는 자동재생을 허용 (WebView2 전용 플래그)
     os.environ.setdefault(
@@ -479,7 +515,7 @@ def main():
 
     # 로그인 세션(쿠키)을 유지해 홈/구독 창에서 한 번 로그인하면 계속 사용.
     os.makedirs(PROFILE_DIR, exist_ok=True)
-    webview.start(private_mode=False, storage_path=PROFILE_DIR)
+    webview.start(_keep_mini_injected, (api,), private_mode=False, storage_path=PROFILE_DIR)
 
 
 if __name__ == "__main__":
