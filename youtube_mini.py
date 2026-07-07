@@ -11,6 +11,7 @@
       재생/일시정지, 음소거, 이전/다음, 목록, URL 열기,
       YT 홈/구독 별도 창, 브라우저 영상 가져오기,
       항상 위, 크기 2배, 전체화면, 최소화, 종료
+  - 홈/구독 창에서 영상 클릭: 그 창은 닫히고 미니 플레이어에서 재생
   - 재생 중 좌클릭: 재생/일시정지 토글
   - 창 이동: 아무 곳이나 드래그
   - 목록 화면: 휠/좌우 방향키 이동, 클릭/Enter 재생
@@ -38,6 +39,42 @@ BROWSER_URLS = {
     "home": "https://www.youtube.com/",
     "subs": "https://www.youtube.com/feed/subscriptions",
 }
+
+# 홈/구독 창에 주입: 영상 링크 클릭을 가로채 미니 플레이어로 넘긴다.
+BROWSER_HOOK_JS = """
+(function(){
+  if (window.__miniHooked) return; window.__miniHooked = true;
+  function idFrom(href){
+    var m = (href||'').match(/(?:youtu\\.be\\/|[?&]v=|shorts\\/|live\\/)([A-Za-z0-9_-]{11})/);
+    return m ? m[1] : null;
+  }
+  function titleFor(a){
+    if (a.title) return a.title;
+    var r = a.closest('ytd-rich-item-renderer,ytd-video-renderer,ytd-grid-video-renderer,ytd-compact-video-renderer,ytd-rich-grid-media');
+    if (r){ var t = r.querySelector('#video-title'); if (t) return (t.title || t.textContent || '').trim(); }
+    return '';
+  }
+  document.addEventListener('click', function(e){
+    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    var id = idFrom(a.href);
+    if (!id) return;
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+    if (window.pywebview && window.pywebview.api)
+      window.pywebview.api.play_in_mini(a.href, titleFor(a));
+  }, true);
+  // 클릭 가로채기를 빠져나간 내비게이션(키보드 이동 등) 대비 감시
+  setInterval(function(){
+    var id = idFrom(location.href);
+    if (id && !window.__miniSent){
+      window.__miniSent = true;
+      if (window.pywebview && window.pywebview.api)
+        window.pywebview.api.play_in_mini(location.href,
+          document.title.replace(/ - YouTube$/, ''));
+    }
+  }, 500);
+})();
+"""
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
@@ -245,11 +282,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     return m ? m[1] : null;
   }
 
-  function addAndPlay(id) {
+  function addAndPlay(id, title) {
     const found = videos.findIndex(v => v.id === id);
-    if (found >= 0) { idx = found; }
-    else { videos.push({title: 'URL \\u00b7 ' + id, id: id}); idx = videos.length - 1; }
+    if (found >= 0) { idx = found; if (title) videos[found].title = title; }
+    else { videos.push({title: title || ('URL \\u00b7 ' + id), id: id}); idx = videos.length - 1; }
     play();
+  }
+
+  // 홈/구독 브라우저 창에서 영상 클릭 시 파이썬 쪽에서 호출
+  function playFromNative(url, title) {
+    const id = parseYtId(url);
+    if (!id) { toast('영상 인식 실패'); return; }
+    addAndPlay(id, title);
   }
 
   function openUrlBox() {
@@ -413,10 +457,38 @@ class Api:
         self._browser = webview.create_window(
             "YouTube",
             url=url,
+            js_api=self,
             width=1000,
             height=650,
             on_top=False,
         )
+        # 페이지가 로드될 때마다 클릭 가로채기 스크립트 주입
+        try:
+            self._browser.events.loaded += self._inject_browser_hook
+        except AttributeError:
+            self._browser.loaded += self._inject_browser_hook
+
+    def _inject_browser_hook(self, window=None):
+        try:
+            if self._browser is not None and self._browser in webview.windows:
+                self._browser.evaluate_js(BROWSER_HOOK_JS)
+        except Exception:
+            pass
+
+    def play_in_mini(self, url, title=None):
+        """브라우저 창에서 영상 클릭 시: 그 창을 숨기고 미니에서 재생."""
+        try:
+            if self._browser is not None and self._browser in webview.windows:
+                self._browser.hide()
+        except Exception:
+            pass
+        try:
+            self._window.restore()
+            self._window.evaluate_js(
+                "playFromNative(%s, %s)" % (json.dumps(url), json.dumps(title or ""))
+            )
+        except Exception:
+            pass
 
     def browser_url(self):
         """브라우저 창의 현재 URL (미니로 가져오기용). 없으면 None."""
