@@ -10,9 +10,9 @@
     python youtube_mini.py
 
 조작법:
-  - 우클릭(화면 어디서나): 메뉴
+  - 우클릭: 커서 위치에 별도 팝업 메뉴 창 (미니 창 크기에 갇히지 않음)
       재생/일시정지, 음소거, 다음/이전 영상, URL 열기,
-      YT 홈/구독 별도 창, 항상 위, 크기, 전체화면, 최소화, 종료
+      YT 홈/구독, 항상 위, 크기, 전체화면, 최소화, 종료, 불투명도 슬라이더
   - 다음 영상: 유튜브 자동재생 알고리즘 그대로 (영상 끝나면 자동 진행)
   - 좌클릭 드래그: 창 이동 (화면 아무 곳이나; 투명 실드가 오동작 차단)
   - 유튜브 자체 컨트롤은 우클릭 메뉴/키보드 단축키(스페이스, m 등)로 조작
@@ -20,8 +20,8 @@
   - 홈/구독 창에서 영상 클릭: 그 창은 닫히고 미니 플레이어에서 재생
 
 저장:
-  창 크기/위치, 항상 위, 마지막 시청 영상이 ~/.yt_mini_profile/config.json
-  에 저장되어 재실행 후에도 이어서 사용.
+  창 크기/위치, 항상 위, 불투명도, 마지막 시청 영상이
+  ~/.yt_mini_profile/config.json 에 저장되어 재실행 후에도 이어서 사용.
 
 로그인:
   크롬 로그인과는 별개(WebView2 자체 프로필 사용). YT 홈/구독 창에서
@@ -36,6 +36,7 @@ import time
 import webview
 
 BASE_W, BASE_H = 194, 110
+MENU_W, MENU_H = 240, 252
 # 라이브 스트림은 종료되면 '실시간 스트림 녹화를 볼 수 없습니다' 오류가
 # 나므로 기본 시작 영상은 항상 재생 가능한 일반 영상으로 둔다.
 DEFAULT_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
@@ -98,13 +99,13 @@ BROWSER_HOOK_JS = r"""
 """
 
 
-# 미니 창(유튜브 시청 페이지)에 주입: 영상만 보이게 하고 자체 UI 를 얹는다.
+# 미니 창(유튜브 시청 페이지)에 주입: 영상만 보이게 하고 실드/손잡이를 얹는다.
+# 주의: 유튜브는 Trusted Types(CSP)를 강제하므로 innerHTML 사용 금지,
+# DOM API 로만 구성할 것. 문자는 BMP 범위만 사용.
 MINI_HOOK_JS = r"""
 (function(){
  try {
   if (window.__miniHooked) return; window.__miniHooked = true;
-  var cfg = __CFG__;
-  var onTop = cfg.onTop !== false;
   var api = function(){ return (window.pywebview && window.pywebview.api) || null; };
 
   // ---- 영상만 꽉 차게 보이도록 CSS ----
@@ -122,15 +123,6 @@ MINI_HOOK_JS = r"""
     '#__mini_grip:hover { opacity:1; }',
     '#__mini_grip::before { content:""; position:absolute; right:2px; bottom:2px;',
     '  width:9px; height:9px; border-right:2px solid #ddd; border-bottom:2px solid #ddd; }',
-    '#__mini_menu { position:fixed; z-index:10002; display:none;',
-    '  background:#1e1e1e; border:1px solid #444; border-radius:4px;',
-    '  box-shadow:0 2px 8px rgba(0,0,0,0.6); padding:2px;',
-    '  grid-template-columns:1fr 1fr; gap:1px;',
-    '  max-height:calc(100vh - 6px); overflow-y:auto;',
-    '  font-family:"Segoe UI","Malgun Gothic",sans-serif; }',
-    '#__mini_menu .mi { font-size:10px; line-height:1; padding:4px 7px;',
-    '  border-radius:3px; cursor:pointer; white-space:nowrap; color:#fff; }',
-    '#__mini_menu .mi:hover { background:#ff5252; }',
     '#__mini_url { position:fixed; z-index:10003; display:none; top:50%; left:50%;',
     '  transform:translate(-50%,-50%); width:calc(100vw - 16px);',
     '  background:#1e1e1e; border:1px solid #555; border-radius:4px; padding:5px; }',
@@ -144,18 +136,16 @@ MINI_HOOK_JS = r"""
   document.documentElement.appendChild(st);
 
   // ---- 자체 UI 요소 ----
-  var menu = document.createElement('div'); menu.id = '__mini_menu';
+  // 투명 실드: 유튜브 플레이어가 마우스 이벤트를 삼키지 못하게 막고
+  // 좌클릭 드래그(창 이동)/우클릭(메뉴)을 안정적으로 받는다.
+  var shield = document.createElement('div'); shield.id = '__mini_shield';
   var urlbox = document.createElement('div'); urlbox.id = '__mini_url';
   var urlinput = document.createElement('input');
   urlinput.placeholder = 'YouTube URL 또는 영상 ID · Enter';
   urlbox.appendChild(urlinput);
   var toastEl = document.createElement('div'); toastEl.id = '__mini_toast';
   var grip = document.createElement('div'); grip.id = '__mini_grip';
-  // 투명 실드: 유튜브 플레이어가 마우스 이벤트를 삼키지 못하게 막고
-  // 좌클릭 드래그(창 이동)/우클릭(메뉴)을 안정적으로 받는다.
-  var shield = document.createElement('div'); shield.id = '__mini_shield';
   document.documentElement.appendChild(shield);
-  document.documentElement.appendChild(menu);
   document.documentElement.appendChild(urlbox);
   document.documentElement.appendChild(toastEl);
   document.documentElement.appendChild(grip);
@@ -168,7 +158,6 @@ MINI_HOOK_JS = r"""
   }
 
   function vid(){ return document.querySelector('video'); }
-  function menuVisible(){ return menu.style.display === 'grid'; }
   function urlVisible(){ return urlbox.style.display === 'block'; }
 
   function togglePlay(){ var v = vid(); if (!v) return; v.paused ? v.play() : v.pause(); }
@@ -189,60 +178,26 @@ MINI_HOOK_JS = r"""
     return null;
   }
 
-  function toggleOnTop(){
-    onTop = !onTop;
-    var a = api(); if (a){ a.set_on_top(onTop); a.save_ui_state({onTop: onTop}); }
-    toast(onTop ? '항상 위: 켜짐' : '항상 위: 꺼짐');
-  }
-
   function openUrl(){
     urlbox.style.display = 'block'; urlinput.value = '';
     setTimeout(function(){ urlinput.focus(); }, 50);
   }
   function closeUrl(){ urlbox.style.display = 'none'; }
 
-  function buildMenu(){
-    var v = vid();
-    // 주의: 유튜브는 Trusted Types(CSP)를 강제하므로 innerHTML 을 쓰면
-    // 예외가 발생한다. DOM API 로만 구성할 것. (이모지도 BMP 문자만 사용)
-    var items = [
-      [(v && v.paused) ? '▶ 재생' : '⏸ 일시정지', togglePlay],
-      [(v && v.muted) ? '소리 켜기' : '음소거', toggleMute],
-      ['⏭ 다음 영상', nextVideo],
-      ['⏮ 이전 영상', prevVideo],
-      ['URL 열기', openUrl],
-      ['YT 홈', function(){ var a = api(); if (a) a.open_browser('home'); }],
-      ['구독 목록', function(){ var a = api(); if (a) a.open_browser('subs'); }],
-      [(onTop ? '✓ ' : '') + '항상 위', toggleOnTop],
-      ['크기 2배', function(){ var a = api(); if (a) a.set_scale(2); }],
-      ['기본 크기', function(){ var a = api(); if (a) a.set_scale(1); }],
-      ['전체화면', function(){ var a = api(); if (a) a.fullscreen(); }],
-      ['— 최소화', function(){ var a = api(); if (a) a.minimize(); }],
-      ['✕ 종료', function(){ var a = api(); if (a) a.quit(); }]
-    ];
-    while (menu.firstChild) menu.removeChild(menu.firstChild);
-    items.forEach(function(it){
-      var d = document.createElement('div');
-      d.className = 'mi'; d.textContent = it[0];
-      d.onclick = function(){ hideMenu(); it[1](); };
-      menu.appendChild(d);
-    });
-  }
+  // 파이썬(팝업 메뉴 창)에서 호출할 수 있게 노출
+  window.__mini = {
+    togglePlay: togglePlay, toggleMute: toggleMute,
+    nextVideo: nextVideo, prevVideo: prevVideo,
+    openUrl: openUrl, toast: toast
+  };
 
-  function showMenu(x, y){
-    buildMenu();
-    menu.style.display = 'grid';
-    var mw = menu.offsetWidth, mh = menu.offsetHeight;
-    menu.style.left = Math.max(0, Math.min(x, innerWidth - mw)) + 'px';
-    menu.style.top  = Math.max(0, Math.min(y, innerHeight - mh)) + 'px';
-  }
-  function hideMenu(){ menu.style.display = 'none'; }
-
+  // 우클릭 → 커서 위치(물리 좌표)에 별도 팝업 메뉴 창
   document.addEventListener('contextmenu', function(e){
     e.preventDefault(); e.stopPropagation();
     closeUrl();
-    if (menuVisible()){ hideMenu(); return; }   // 우클릭 다시 누르면 닫기
-    showMenu(e.clientX, e.clientY);
+    var dpr = window.devicePixelRatio || 1;
+    var a = api();
+    if (a) a.show_menu(Math.round(e.screenX * dpr), Math.round(e.screenY * dpr));
   }, true);
 
   // 실드 좌클릭 드래그 = 창 이동
@@ -250,8 +205,9 @@ MINI_HOOK_JS = r"""
   shield.addEventListener('pointerdown', function(e){
     if (e.button !== 0) return;
     e.preventDefault();
+    var a = api(); if (a) a.hide_menu();
     dragging = true; dgX = e.screenX; dgY = e.screenY; dgLast = 0;
-    var a = api(); if (a) a.begin_move();
+    if (a) a.begin_move();
     shield.setPointerCapture(e.pointerId);
   });
   shield.addEventListener('pointermove', function(e){
@@ -265,7 +221,6 @@ MINI_HOOK_JS = r"""
   shield.addEventListener('pointercancel', function(){ dragging = false; });
 
   document.addEventListener('click', function(e){
-    if (!menu.contains(e.target)) hideMenu();
     if (urlVisible() && !urlbox.contains(e.target)) closeUrl();
   });
 
@@ -282,7 +237,6 @@ MINI_HOOK_JS = r"""
   // 우측 하단 손잡이 드래그로 창 크기 조절
   var resizing = false, rsX = 0, rsY = 0, rsW = 0, rsH = 0, rsLast = 0;
   grip.addEventListener('mousedown', function(e){
-    // easy_drag(창 이동)로 이벤트가 넘어가지 않게 차단
     e.preventDefault(); e.stopPropagation();
   });
   grip.addEventListener('pointerdown', function(e){
@@ -296,7 +250,7 @@ MINI_HOOK_JS = r"""
   grip.addEventListener('pointermove', function(e){
     if (!resizing) return;
     var now = Date.now();
-    if (now - rsLast < 33) return;   // 호출 폭주 방지
+    if (now - rsLast < 33) return;
     rsLast = now;
     var a = api(); if (a) a.resize_to(rsW + (e.screenX - rsX), rsH + (e.screenY - rsY));
   });
@@ -309,7 +263,6 @@ MINI_HOOK_JS = r"""
     var b = document.querySelector('.ytp-autonav-toggle-button');
     if (b && b.getAttribute('aria-checked') === 'false') b.click();
 
-    // 재생 불가 영상(종료된 라이브 등)이면 안내
     var errEl = document.querySelector('#movie_player .ytp-error');
     if (errEl && !window.__miniErrToasted){
       window.__miniErrToasted = true;
@@ -333,6 +286,92 @@ MINI_HOOK_JS = r"""
 """
 
 
+# 팝업 메뉴 창(자체 페이지 — 유튜브 CSP 제약 없음)
+MENU_HTML = r"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #1e1e1e; color: #fff;
+    font: 12px -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+    border: 1px solid #444; border-radius: 6px;
+    overflow: hidden; user-select: none;
+    width: 100vw; height: 100vh;
+  }
+  #g { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 5px; }
+  .mi { padding: 6px 9px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+  .mi:hover { background: #ff5252; }
+  #op { grid-column: 1 / span 2; padding: 4px 9px 6px; }
+  #op label { font-size: 11px; opacity: 0.8; display: block; margin-bottom: 2px; }
+  input[type=range] { width: 100%; }
+</style>
+</head>
+<body>
+<div id="g"></div>
+<script>
+  var api = function(){ return (window.pywebview && window.pywebview.api) || null; };
+  var st = { playing: false, muted: false, onTop: true, opacity: 100 };
+  var items = [
+    ['play',       function(){ return st.playing ? '⏸ 일시정지' : '▶ 재생'; }],
+    ['mute',       function(){ return st.muted ? '소리 켜기' : '음소거'; }],
+    ['next',       function(){ return '⏭ 다음 영상'; }],
+    ['prev',       function(){ return '⏮ 이전 영상'; }],
+    ['url',        function(){ return 'URL 열기'; }],
+    ['home',       function(){ return 'YT 홈'; }],
+    ['subs',       function(){ return '구독 목록'; }],
+    ['ontop',      function(){ return (st.onTop ? '✓ ' : '') + '항상 위'; }],
+    ['scale2',     function(){ return '크기 2배'; }],
+    ['scale1',     function(){ return '기본 크기'; }],
+    ['fullscreen', function(){ return '전체화면'; }],
+    ['minimize',   function(){ return '— 최소화'; }],
+    ['quit',       function(){ return '✕ 종료'; }]
+  ];
+  var g = document.getElementById('g');
+  items.forEach(function(it){
+    var d = document.createElement('div');
+    d.className = 'mi'; d.id = 'mi_' + it[0];
+    d.onclick = function(){ var a = api(); if (a) a.menu_action(it[0]); };
+    g.appendChild(d);
+  });
+  var op = document.createElement('div'); op.id = 'op';
+  var lb = document.createElement('label');
+  var rg = document.createElement('input');
+  rg.type = 'range'; rg.min = 20; rg.max = 100; rg.value = 100;
+  rg.addEventListener('input', function(){
+    lb.textContent = '불투명도 ' + rg.value + '%';
+    var a = api(); if (a) a.set_opacity(parseInt(rg.value, 10));
+  });
+  op.appendChild(lb); op.appendChild(rg); g.appendChild(op);
+
+  function refresh(){
+    items.forEach(function(it){
+      document.getElementById('mi_' + it[0]).textContent = it[1]();
+    });
+    rg.value = st.opacity;
+    lb.textContent = '불투명도 ' + st.opacity + '%';
+  }
+  function setState(s){ st = Object.assign(st, s || {}); refresh(); }
+  window.setState = setState;
+  refresh();
+
+  // 메뉴 밖으로 마우스가 나가면 잠시 후 닫기, Esc 로도 닫기
+  var leaveTimer = null;
+  document.addEventListener('mouseleave', function(){
+    leaveTimer = setTimeout(function(){ var a = api(); if (a) a.hide_menu(); }, 600);
+  });
+  document.addEventListener('mouseenter', function(){ clearTimeout(leaveTimer); });
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Escape'){ var a = api(); if (a) a.hide_menu(); }
+  });
+  document.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+</script>
+</body>
+</html>
+"""
+
+
 class Api:
     # 주의: pywebview 는 js_api 의 공개 속성을 재귀 탐색해 JS 에 노출하므로
     # 창 객체는 반드시 밑줄(_) 접두사 속성에 보관해야 한다.
@@ -340,6 +379,8 @@ class Api:
     def __init__(self, config=None):
         self._window = None
         self._browser = None
+        self._menu = None
+        self._menu_open = False
         self._config = config if isinstance(config, dict) else {}
         self._save_timer = None
 
@@ -351,7 +392,7 @@ class Api:
         self._save_timer.start()
 
     def save_ui_state(self, state):
-        """JS 쪽 설정(항상 위, 마지막 영상 등) 저장."""
+        """JS 쪽 설정(마지막 영상 등) 저장."""
         if isinstance(state, dict):
             self._config.update(state)
             self._persist_later()
@@ -373,26 +414,45 @@ class Api:
         except Exception:
             pass
 
-    def set_on_top(self, flag):
-        flag = bool(flag)
-        self._config.update({"onTop": flag})
-        self._persist_later()
-        # 창 속성(TopMost)은 UI 스레드에서만 변경 가능 — js_api 호출은
-        # 백그라운드 스레드라 직접 만지면 앱이 통째로 죽는다.
+    def _on_ui_thread(self, fn):
+        """WinForms UI 스레드에서 실행 (창 속성은 UI 스레드 전용)."""
         try:
             native = getattr(self._window, "native", None)
             if native is not None and hasattr(native, "BeginInvoke"):
                 import System  # pythonnet (Windows)
-                native.BeginInvoke(
-                    System.Action(lambda: setattr(native, "TopMost", flag))
-                )
-                return
+                native.BeginInvoke(System.Action(fn))
+                return True
         except Exception:
             pass
+        return False
+
+    def set_on_top(self, flag):
+        flag = bool(flag)
+        self._config.update({"onTop": flag})
+        self._persist_later()
+        native = getattr(self._window, "native", None)
+        if self._on_ui_thread(lambda: setattr(native, "TopMost", flag)):
+            return
         try:
             self._window.on_top = flag
         except Exception:
             pass
+
+    def set_opacity(self, pct):
+        """불투명도 슬라이더 (20~100%)."""
+        try:
+            pct = max(20, min(100, int(pct)))
+        except Exception:
+            return
+        self._config.update({"opacity": pct})
+        self._persist_later()
+        self._apply_opacity(pct)
+
+    def _apply_opacity(self, pct):
+        native = getattr(self._window, "native", None)
+        if native is None:
+            return
+        self._on_ui_thread(lambda: setattr(native, "Opacity", pct / 100.0))
 
     def begin_move(self):
         """실드 드래그 시작: 창의 시작 위치를 기억."""
@@ -435,7 +495,112 @@ class Api:
         self._window.minimize()
 
     def quit(self):
+        for w in (self._menu, self._browser):
+            try:
+                if w is not None and w in webview.windows:
+                    w.destroy()
+            except Exception:
+                pass
         self._window.destroy()
+
+    # ---- 팝업 메뉴 창 ----
+
+    def _ensure_menu(self):
+        if self._menu is not None and self._menu in webview.windows:
+            return
+        self._menu = webview.create_window(
+            "menu",
+            html=MENU_HTML,
+            js_api=self,
+            width=MENU_W,
+            height=MENU_H,
+            frameless=True,
+            on_top=True,
+            resizable=False,
+            hidden=True,
+        )
+
+    def show_menu(self, sx, sy):
+        """커서 위치(물리 좌표)에 팝업 메뉴 표시. 열려 있으면 닫기(토글)."""
+        if self._menu_open:
+            self.hide_menu()
+            return
+        self._ensure_menu()
+        state = {
+            "onTop": bool(self._config.get("onTop", True)),
+            "opacity": int(self._config.get("opacity", 100)),
+        }
+        try:
+            r = self._window.evaluate_js(
+                "(function(){var v=document.querySelector('video');"
+                "return v ? ((v.paused?'0':'1')+(v.muted?'1':'0')) : '00';})()"
+            )
+            state["playing"] = bool(r and r[0] == "1")
+            state["muted"] = bool(r and len(r) > 1 and r[1] == "1")
+        except Exception:
+            pass
+        try:
+            x, y = int(sx), int(sy)
+            try:
+                s = webview.screens[0]
+                # 주 모니터 안에서 열릴 때만 화면 밖으로 나가지 않게 보정
+                if 0 <= x < s.width:
+                    x = min(x, s.width - MENU_W)
+                if 0 <= y < s.height:
+                    y = min(y, s.height - MENU_H)
+            except Exception:
+                pass
+            try:
+                self._menu.evaluate_js(
+                    "window.setState && setState(%s)" % json.dumps(state, ensure_ascii=False)
+                )
+            except Exception:
+                pass
+            self._menu.move(x, y)
+            self._menu.show()
+            self._menu_open = True
+        except Exception:
+            pass
+
+    def hide_menu(self):
+        self._menu_open = False
+        try:
+            if self._menu is not None and self._menu in webview.windows:
+                self._menu.hide()
+        except Exception:
+            pass
+
+    def menu_action(self, name):
+        """팝업 메뉴 항목 실행."""
+        self.hide_menu()
+        page_calls = {
+            "play": "window.__mini && __mini.togglePlay()",
+            "mute": "window.__mini && __mini.toggleMute()",
+            "next": "window.__mini && __mini.nextVideo()",
+            "prev": "window.__mini && __mini.prevVideo()",
+            "url": "window.__mini && __mini.openUrl()",
+        }
+        try:
+            if name in page_calls:
+                self._window.evaluate_js(page_calls[name])
+            elif name in ("home", "subs"):
+                self.open_browser(name)
+            elif name == "ontop":
+                self.set_on_top(not self._config.get("onTop", True))
+            elif name == "scale2":
+                self.set_scale(2)
+            elif name == "scale1":
+                self.set_scale(1)
+            elif name == "fullscreen":
+                self.fullscreen()
+            elif name == "minimize":
+                self.minimize()
+            elif name == "quit":
+                self.quit()
+        except Exception:
+            pass
+
+    # ---- 홈/구독 브라우저 창 ----
 
     def _browser_geometry(self, bw=1000, bh=650):
         """미니 창 바로 아래(공간 없으면 위)에 붙는 위치 계산."""
@@ -497,11 +662,7 @@ class Api:
 
     def _inject_mini_hook(self, window=None):
         try:
-            js = MINI_HOOK_JS.replace(
-                "__CFG__",
-                json.dumps({"onTop": bool(self._config.get("onTop", True))}),
-            )
-            self._window.evaluate_js(js)
+            self._window.evaluate_js(MINI_HOOK_JS)
         except Exception:
             pass
 
@@ -530,6 +691,8 @@ def _keep_mini_injected(api):
     loaded 이벤트를 놓치거나 주입 스크립트가 실패해도 2초마다 재시도한다.
     스크립트 자체가 __miniHooked 가드로 멱등이라 중복 주입은 무해하다.
     """
+    # 시작 시 저장된 불투명도 적용
+    api._apply_opacity(int(api._config.get("opacity", 100)))
     while True:
         api._inject_mini_hook()
         time.sleep(2)
@@ -563,7 +726,9 @@ def main():
         easy_drag=False,
     )
     api._window = window
-    # 시청 페이지가 로드될 때마다 미니 UI(CSS/메뉴/손잡이) 주입
+    # 팝업 메뉴 창을 미리(숨김) 만들어 첫 우클릭 지연을 없앤다
+    api._ensure_menu()
+    # 시청 페이지가 로드될 때마다 미니 UI(CSS/실드/손잡이) 주입
     try:
         window.events.loaded += api._inject_mini_hook
     except AttributeError:
