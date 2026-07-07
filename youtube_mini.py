@@ -250,26 +250,29 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 
 class Api:
+    # 주의: pywebview 는 js_api 의 공개 속성을 재귀 탐색해 JS 에 노출하므로
+    # 창 객체는 반드시 밑줄(_) 접두사 속성에 보관해야 한다.
+    # (공개 속성에 두면 window.native... 무한 재귀 오류 발생)
     def __init__(self):
-        self.window = None
+        self._window = None
 
     def set_on_top(self, flag):
         try:
-            self.window.on_top = bool(flag)
+            self._window.on_top = bool(flag)
         except Exception:
             pass
 
     def set_scale(self, scale):
-        self.window.resize(BASE_W * int(scale), BASE_H * int(scale))
+        self._window.resize(BASE_W * int(scale), BASE_H * int(scale))
 
     def fullscreen(self):
-        self.window.toggle_fullscreen()
+        self._window.toggle_fullscreen()
 
     def minimize(self):
-        self.window.minimize()
+        self._window.minimize()
 
     def quit(self):
-        self.window.destroy()
+        self._window.destroy()
 
 
 def main():
@@ -293,7 +296,7 @@ def main():
         frameless=True,
         easy_drag=True,
     )
-    api.window = window
+    api._window = window
     webview.start(http_server=True)
 
 
