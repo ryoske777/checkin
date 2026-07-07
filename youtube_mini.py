@@ -18,6 +18,10 @@
   - 유튜브 자체 컨트롤은 우클릭 메뉴/키보드 단축키(스페이스, m 등)로 조작
   - 크기 조절: 우측 하단 손잡이 드래그 (메뉴 '기본 크기'로 복원)
   - 홈/구독 창에서 영상 클릭: 그 창은 닫히고 미니 플레이어에서 재생
+  - 카멜레온 모드: 다른 창(브라우저 등) 위에 올려두고 켜면 그 창을
+    호스트로 기억 — 호스트가 포커스를 잃으면 같이 숨고, 돌아오면
+    다시 그 위에 나타나며, 호스트 창을 옮기면 상대 위치를 유지하며
+    따라간다 (Windows 전용)
 
 저장:
   창 크기/위치, 항상 위, 불투명도, 마지막 시청 영상이
@@ -27,11 +31,13 @@
   크롬 로그인과는 별개(WebView2 자체 프로필 사용). YT 홈/구독 창에서
   한 번 로그인하면 유지되며, 추천 알고리즘도 계정 기준으로 적용된다.
 """
+import ctypes
 import json
 import os
 import re
 import threading
 import time
+from ctypes import wintypes
 
 import webview
 
@@ -50,6 +56,34 @@ BROWSER_URLS = {
     "home": "https://www.youtube.com/",
     "subs": "https://www.youtube.com/feed/subscriptions",
 }
+
+
+_USER32 = None
+
+
+def _user32():
+    """Win32 user32 (카멜레온 모드용). Windows 가 아니면 None."""
+    global _USER32
+    if _USER32 is not None:
+        return _USER32
+    try:
+        u = ctypes.windll.user32
+    except AttributeError:
+        return None
+    u.WindowFromPoint.restype = ctypes.c_void_p
+    u.WindowFromPoint.argtypes = [wintypes.POINT]
+    u.GetAncestor.restype = ctypes.c_void_p
+    u.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    u.GetForegroundWindow.restype = ctypes.c_void_p
+    u.IsWindow.argtypes = [ctypes.c_void_p]
+    u.IsIconic.argtypes = [ctypes.c_void_p]
+    u.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    u.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)]
+    _USER32 = u
+    return u
+
+
+SW_HIDE, SW_SHOWNOACTIVATE, GA_ROOT = 0, 4, 2
 
 
 def load_config():
@@ -312,7 +346,7 @@ MENU_HTML = r"""<!DOCTYPE html>
 <div id="g"></div>
 <script>
   var api = function(){ return (window.pywebview && window.pywebview.api) || null; };
-  var st = { playing: false, muted: false, onTop: true, opacity: 100 };
+  var st = { playing: false, muted: false, onTop: true, opacity: 100, cham: false };
   var items = [
     ['play',       function(){ return st.playing ? '⏸ 일시정지' : '▶ 재생'; }],
     ['mute',       function(){ return st.muted ? '소리 켜기' : '음소거'; }],
@@ -322,6 +356,7 @@ MENU_HTML = r"""<!DOCTYPE html>
     ['home',       function(){ return 'YT 홈'; }],
     ['subs',       function(){ return '구독 목록'; }],
     ['ontop',      function(){ return (st.onTop ? '✓ ' : '') + '항상 위'; }],
+    ['cham',       function(){ return (st.cham ? '✓ ' : '') + '카멜레온 모드'; }],
     ['scale2',     function(){ return '크기 2배'; }],
     ['scale1',     function(){ return '기본 크기'; }],
     ['fullscreen', function(){ return '전체화면'; }],
@@ -397,6 +432,12 @@ class Api:
         self._menu_w, self._menu_h = MENU_W, MENU_H
         self._config = config if isinstance(config, dict) else {}
         self._save_timer = None
+        # 카멜레온 모드: 호스트 창을 따라 보이고/숨고/이동
+        self._cham_host = None          # 호스트 창 HWND
+        self._cham_offset = (0, 0)      # 호스트 기준 상대 위치
+        self._cham_visible = True
+        self._cham_last_set = None      # 감시 스레드가 마지막으로 지정한 위치
+        self._cham_thread = None
 
     def _persist_later(self, delay=0.5):
         if self._save_timer is not None:
@@ -517,6 +558,122 @@ class Api:
                 pass
         self._window.destroy()
 
+    # ---- 카멜레온 모드 ----
+
+    def _hwnd_of(self, w):
+        try:
+            handle = w.native.Handle
+            try:
+                return int(handle.ToInt64())
+            except Exception:
+                return int(handle)
+        except Exception:
+            return None
+
+    def _toast(self, msg):
+        try:
+            self._window.evaluate_js(
+                "window.__mini && __mini.toast(%s)" % json.dumps(msg, ensure_ascii=False)
+            )
+        except Exception:
+            pass
+
+    def toggle_chameleon(self):
+        u = _user32()
+        if u is None:
+            self._toast("카멜레온 모드는 Windows 전용이에요")
+            return
+        if self._cham_host:
+            # 해제
+            self._cham_host = None
+            mini = self._hwnd_of(self._window)
+            if mini:
+                u.ShowWindow(mini, SW_SHOWNOACTIVATE)
+            self._cham_visible = True
+            self._toast("카멜레온 모드: 꺼짐")
+            return
+        # 미니 창 중심점 아래에 있는 최상위 창을 호스트로 지정
+        try:
+            mini = self._hwnd_of(self._window)
+            cx = self._window.x + self._window.width // 2
+            cy = self._window.y + self._window.height // 2
+            u.ShowWindow(mini, SW_HIDE)   # 자기 자신이 잡히지 않게 잠깐 숨김
+            try:
+                hwnd = u.WindowFromPoint(wintypes.POINT(cx, cy))
+                host = u.GetAncestor(hwnd, GA_ROOT) if hwnd else None
+            finally:
+                u.ShowWindow(mini, SW_SHOWNOACTIVATE)
+            host = int(host) if host else 0
+            ours = {self._hwnd_of(w) for w in (self._window, self._menu, self._browser) if w}
+            if not host or host in ours:
+                self._toast("아래에 붙을 창이 없어요 — 다른 창 위에 올려두고 켜주세요")
+                return
+            rect = wintypes.RECT()
+            u.GetWindowRect(host, ctypes.byref(rect))
+            self._cham_offset = (self._window.x - rect.left, self._window.y - rect.top)
+            self._cham_last_set = None
+            self._cham_host = host
+            self._cham_visible = True
+            if self._cham_thread is None or not self._cham_thread.is_alive():
+                self._cham_thread = threading.Thread(target=self._cham_loop, daemon=True)
+                self._cham_thread.start()
+            self._toast("카멜레온 모드: 켜짐 — 아래 창을 따라다녀요")
+        except Exception:
+            self._cham_host = None
+            self._toast("카멜레온 모드를 켤 수 없어요")
+
+    def _cham_loop(self):
+        """호스트 창의 포커스/위치를 따라 미니 창을 보이고·숨기고·이동."""
+        u = _user32()
+        while True:
+            time.sleep(0.25)
+            host = self._cham_host
+            if not host:
+                continue
+            try:
+                mini = self._hwnd_of(self._window)
+                if not mini:
+                    continue
+                if not u.IsWindow(host):
+                    # 호스트가 닫힘 → 모드 해제하고 다시 표시
+                    self._cham_host = None
+                    u.ShowWindow(mini, SW_SHOWNOACTIVATE)
+                    self._cham_visible = True
+                    self._toast("호스트 창이 닫혀 카멜레온 모드를 껐어요")
+                    continue
+
+                fg = u.GetForegroundWindow()
+                fg_root = int(u.GetAncestor(fg, GA_ROOT)) if fg else 0
+                ours = {h for h in (
+                    self._hwnd_of(self._window),
+                    self._hwnd_of(self._menu) if self._menu else None,
+                    self._hwnd_of(self._browser) if self._browser else None,
+                ) if h}
+                visible = (fg_root == host) or (fg_root in ours)
+                if u.IsIconic(host):
+                    visible = False
+
+                if visible:
+                    # 호스트 이동 따라가기 (유저가 미니를 직접 옮기면 오프셋 갱신)
+                    rect = wintypes.RECT()
+                    u.GetWindowRect(host, ctypes.byref(rect))
+                    cur = (self._window.x, self._window.y)
+                    if self._cham_last_set is not None and cur != self._cham_last_set:
+                        self._cham_offset = (cur[0] - rect.left, cur[1] - rect.top)
+                    expect = (rect.left + self._cham_offset[0],
+                              rect.top + self._cham_offset[1])
+                    if cur != expect:
+                        self._window.move(expect[0], expect[1])
+                    self._cham_last_set = expect
+
+                if visible != self._cham_visible:
+                    self._cham_visible = visible
+                    if not visible:
+                        self.hide_menu()
+                    u.ShowWindow(mini, SW_SHOWNOACTIVATE if visible else SW_HIDE)
+            except Exception:
+                pass
+
     # ---- 팝업 메뉴 창 ----
 
     def _ensure_menu(self):
@@ -552,6 +709,7 @@ class Api:
         state = {
             "onTop": bool(self._config.get("onTop", True)),
             "opacity": int(self._config.get("opacity", 100)),
+            "cham": bool(self._cham_host),
         }
         try:
             r = self._window.evaluate_js(
@@ -610,6 +768,8 @@ class Api:
                 self.open_browser(name)
             elif name == "ontop":
                 self.set_on_top(not self._config.get("onTop", True))
+            elif name == "cham":
+                self.toggle_chameleon()
             elif name == "scale2":
                 self.set_scale(2)
             elif name == "scale1":
