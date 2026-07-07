@@ -298,7 +298,7 @@ MENU_HTML = r"""<!DOCTYPE html>
     font: 12px -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
     border: 1px solid #444; border-radius: 6px;
     overflow: hidden; user-select: none;
-    width: 100vw; height: 100vh;
+    width: 240px;   /* CSS 기준 고정폭 — 창 크기는 배율 곱해서 맞춘다 */
   }
   #g { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 5px; }
   .mi { padding: 6px 9px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
@@ -356,6 +356,19 @@ MENU_HTML = r"""<!DOCTYPE html>
   window.setState = setState;
   refresh();
 
+  // Windows 디스플레이 배율(DPI) 때문에 창 물리 크기와 CSS 크기가 달라
+  // 메뉴가 잘릴 수 있다 → 콘텐츠 크기 x 배율로 창 크기를 맞춘다.
+  function reportSize(){
+    var a = api(); if (!a) return false;
+    var dpr = window.devicePixelRatio || 1;
+    var h = g.offsetHeight + 4;
+    a.menu_resize(Math.ceil(242 * dpr), Math.ceil(h * dpr));
+    return true;
+  }
+  var sizeTimer = setInterval(function(){
+    if (reportSize()) clearInterval(sizeTimer);
+  }, 200);
+
   // 메뉴 밖으로 마우스가 나가면 잠시 후 닫기, Esc 로도 닫기
   var leaveTimer = null;
   document.addEventListener('mouseleave', function(){
@@ -381,6 +394,7 @@ class Api:
         self._browser = None
         self._menu = None
         self._menu_open = False
+        self._menu_w, self._menu_h = MENU_W, MENU_H
         self._config = config if isinstance(config, dict) else {}
         self._save_timer = None
 
@@ -520,6 +534,15 @@ class Api:
             hidden=True,
         )
 
+    def menu_resize(self, w, h):
+        """메뉴 페이지가 측정한 실제 필요 크기(물리 px)로 창 크기 보정."""
+        try:
+            self._menu_w, self._menu_h = int(w), int(h)
+            if self._menu is not None and self._menu in webview.windows:
+                self._menu.resize(self._menu_w, self._menu_h)
+        except Exception:
+            pass
+
     def show_menu(self, sx, sy):
         """커서 위치(물리 좌표)에 팝업 메뉴 표시. 열려 있으면 닫기(토글)."""
         if self._menu_open:
@@ -545,9 +568,9 @@ class Api:
                 s = webview.screens[0]
                 # 주 모니터 안에서 열릴 때만 화면 밖으로 나가지 않게 보정
                 if 0 <= x < s.width:
-                    x = min(x, s.width - MENU_W)
+                    x = min(x, s.width - self._menu_w)
                 if 0 <= y < s.height:
-                    y = min(y, s.height - MENU_H)
+                    y = min(y, s.height - self._menu_h)
             except Exception:
                 pass
             try:
@@ -652,6 +675,20 @@ class Api:
             self._browser.events.loaded += self._inject_browser_hook
         except AttributeError:
             self._browser.loaded += self._inject_browser_hook
+        # 생성 시 지정한 좌표가 무시되는 경우가 있어 잠시 후 한 번 더 이동
+        if x is not None:
+            browser = self._browser
+
+            def _reposition():
+                try:
+                    if browser in webview.windows:
+                        browser.move(x, y)
+                except Exception:
+                    pass
+
+            t = threading.Timer(0.8, _reposition)
+            t.daemon = True
+            t.start()
 
     def _inject_browser_hook(self, window=None):
         try:
