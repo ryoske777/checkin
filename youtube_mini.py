@@ -79,11 +79,18 @@ def _user32():
     u.IsIconic.argtypes = [ctypes.c_void_p]
     u.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
     u.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)]
+    u.IsWindowVisible.argtypes = [ctypes.c_void_p]
+    u.SetWindowPos.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+    ]
     _USER32 = u
     return u
 
 
 SW_HIDE, SW_SHOWNOACTIVATE, GA_ROOT = 0, 4, 2
+HWND_TOPMOST = -1
+SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x0001, 0x0010, 0x0040
 
 
 def load_config():
@@ -643,7 +650,7 @@ class Api:
                     continue
 
                 fg = u.GetForegroundWindow()
-                fg_root = int(u.GetAncestor(fg, GA_ROOT)) if fg else 0
+                fg_root = int(u.GetAncestor(fg, GA_ROOT) or 0) if fg else 0
                 ours = {h for h in (
                     self._hwnd_of(self._window),
                     self._hwnd_of(self._menu) if self._menu else None,
@@ -653,24 +660,28 @@ class Api:
                 if u.IsIconic(host):
                     visible = False
 
+                # 플래그가 아니라 실제 표시 상태 기준으로 동기화 —
+                # 한 번 어긋나도 다음 주기(0.25s)에 반드시 복구된다.
+                mini_shown = bool(u.IsWindowVisible(mini))
                 if visible:
-                    # 호스트 이동 따라가기 (유저가 미니를 직접 옮기면 오프셋 갱신)
                     rect = wintypes.RECT()
                     u.GetWindowRect(host, ctypes.byref(rect))
                     cur = (self._window.x, self._window.y)
-                    if self._cham_last_set is not None and cur != self._cham_last_set:
+                    # 유저가 미니를 직접 옮겼으면 상대 위치 재계산
+                    if (mini_shown and self._cham_last_set is not None
+                            and cur != self._cham_last_set):
                         self._cham_offset = (cur[0] - rect.left, cur[1] - rect.top)
                     expect = (rect.left + self._cham_offset[0],
                               rect.top + self._cham_offset[1])
-                    if cur != expect:
-                        self._window.move(expect[0], expect[1])
+                    if not mini_shown or cur != expect:
+                        # 표시 + 위치 + 최상위 z순서를 한 번에 복구 (포커스는 안 뺏음)
+                        u.SetWindowPos(mini, HWND_TOPMOST, expect[0], expect[1], 0, 0,
+                                       SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
                     self._cham_last_set = expect
-
-                if visible != self._cham_visible:
-                    self._cham_visible = visible
-                    if not visible:
-                        self.hide_menu()
-                    u.ShowWindow(mini, SW_SHOWNOACTIVATE if visible else SW_HIDE)
+                elif mini_shown:
+                    self.hide_menu()
+                    u.ShowWindow(mini, SW_HIDE)
+                self._cham_visible = visible
             except Exception:
                 pass
 
@@ -690,6 +701,25 @@ class Api:
             resizable=False,
             hidden=True,
         )
+        # hidden=True 가 무시되고 잠깐 표시되는 경우가 있어,
+        # 의도치 않게 표시되면(우클릭으로 연 게 아니면) 즉시 숨긴다.
+        try:
+            self._menu.events.shown += self._on_menu_shown
+        except Exception:
+            pass
+        for delay in (0.3, 1.0):
+            t = threading.Timer(delay, self._on_menu_shown)
+            t.daemon = True
+            t.start()
+
+    def _on_menu_shown(self, window=None):
+        if self._menu_open:
+            return
+        try:
+            if self._menu is not None and self._menu in webview.windows:
+                self._menu.hide()
+        except Exception:
+            pass
 
     def menu_resize(self, w, h):
         """메뉴 페이지가 측정한 실제 필요 크기(물리 px)로 창 크기 보정."""
@@ -738,8 +768,9 @@ class Api:
             except Exception:
                 pass
             self._menu.move(x, y)
-            self._menu.show()
+            # shown 이벤트 가드(_on_menu_shown)가 닫아버리지 않도록 먼저 표시 상태 기록
             self._menu_open = True
+            self._menu.show()
         except Exception:
             pass
 
@@ -890,6 +921,10 @@ def _keep_mini_injected(api):
     """
     # 시작 시 저장된 불투명도 적용
     api._apply_opacity(int(api._config.get("opacity", 100)))
+    # 팝업 메뉴 창을 미리(숨김) 만들어 첫 우클릭 지연을 없앤다.
+    # 시작 전에 만들면 hidden 이 무시되어 흰 창이 잠깐 보이므로 여기서 생성.
+    time.sleep(0.5)
+    api._ensure_menu()
     while True:
         api._inject_mini_hook()
         time.sleep(2)
@@ -923,8 +958,6 @@ def main():
         easy_drag=False,
     )
     api._window = window
-    # 팝업 메뉴 창을 미리(숨김) 만들어 첫 우클릭 지연을 없앤다
-    api._ensure_menu()
     # 시청 페이지가 로드될 때마다 미니 UI(CSS/실드/손잡이) 주입
     try:
         window.events.loaded += api._inject_mini_hook
