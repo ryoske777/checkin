@@ -18,9 +18,10 @@
   - 유튜브 자체 컨트롤은 우클릭 메뉴/키보드 단축키(스페이스, m 등)로 조작
   - 크기 조절: 우측 하단 손잡이 드래그 (메뉴 '기본 크기'로 복원)
   - 홈/구독 창에서 영상 클릭: 그 창은 닫히고 미니 플레이어에서 재생
-  - 카멜레온 모드: 다른 창(브라우저 등) 위에 올려두고 켜면 그 창을
-    호스트로 기억 — 호스트가 포커스를 잃으면 같이 숨고, 돌아오면
-    다시 그 위에 나타나며, 호스트 창을 옮기면 상대 위치를 유지하며
+  - 카멜레온 모드: 다른 창(브라우저 등) 위에 올려두고 켜면 그 창과
+    현재 탭(창 제목)을 호스트로 기억 — 호스트가 포커스를 잃거나
+    브라우저 탭이 바뀌면 같이 숨고, 기억한 창/탭으로 돌아오면 다시
+    그 위에 나타난다. 호스트 창을 옮기면 상대 위치를 유지하며
     따라간다 (Windows 전용)
 
 저장:
@@ -84,8 +85,25 @@ def _user32():
         ctypes.c_void_p, ctypes.c_void_p,
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint,
     ]
+    u.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
+    u.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
     _USER32 = u
     return u
+
+
+def _win_title(u, hwnd):
+    try:
+        n = u.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(n + 2)
+        u.GetWindowTextW(hwnd, buf, n + 1)
+        return buf.value or ""
+    except Exception:
+        return ""
+
+
+def _norm_title(title):
+    """탭 식별용 제목 정규화: 알림 카운트 '(3) ' 같은 접두어는 무시."""
+    return re.sub(r"^\(\d+\)\s*", "", title or "").strip()
 
 
 SW_HIDE, SW_SHOWNOACTIVATE, GA_ROOT = 0, 4, 2
@@ -441,6 +459,7 @@ class Api:
         self._save_timer = None
         # 카멜레온 모드: 호스트 창을 따라 보이고/숨고/이동
         self._cham_host = None          # 호스트 창 HWND
+        self._cham_title = None         # 켤 당시 호스트 창 제목(=탭 식별)
         self._cham_offset = (0, 0)      # 호스트 기준 상대 위치
         self._cham_visible = True
         self._cham_last_set = None      # 감시 스레드가 마지막으로 지정한 위치
@@ -593,6 +612,7 @@ class Api:
         if self._cham_host:
             # 해제
             self._cham_host = None
+            self._cham_title = None
             mini = self._hwnd_of(self._window)
             if mini:
                 u.ShowWindow(mini, SW_SHOWNOACTIVATE)
@@ -619,12 +639,14 @@ class Api:
             u.GetWindowRect(host, ctypes.byref(rect))
             self._cham_offset = (self._window.x - rect.left, self._window.y - rect.top)
             self._cham_last_set = None
+            # 현재 창 제목(=브라우저 탭)을 기억 — 탭이 바뀌면 제목이 바뀐다
+            self._cham_title = _norm_title(_win_title(u, host))
             self._cham_host = host
             self._cham_visible = True
             if self._cham_thread is None or not self._cham_thread.is_alive():
                 self._cham_thread = threading.Thread(target=self._cham_loop, daemon=True)
                 self._cham_thread.start()
-            self._toast("카멜레온 모드: 켜짐 — 아래 창을 따라다녀요")
+            self._toast("카멜레온 모드: 켜짐 — 이 창/탭을 기억했어요")
         except Exception:
             self._cham_host = None
             self._toast("카멜레온 모드를 켤 수 없어요")
@@ -659,6 +681,11 @@ class Api:
                 visible = (fg_root == host) or (fg_root in ours)
                 if u.IsIconic(host):
                     visible = False
+                # 같은 창이라도 탭(창 제목)이 바뀌면 숨기고,
+                # 기억한 탭으로 돌아오면 다시 표시
+                if visible and self._cham_title:
+                    if _norm_title(_win_title(u, host)) != self._cham_title:
+                        visible = False
 
                 # 플래그가 아니라 실제 표시 상태 기준으로 동기화 —
                 # 한 번 어긋나도 다음 주기(0.25s)에 반드시 복구된다.
