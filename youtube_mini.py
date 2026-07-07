@@ -16,6 +16,11 @@
   - 창 이동: 아무 곳이나 드래그
   - 목록 화면: 휠/좌우 방향키 이동, 클릭/Enter 재생
   - Esc: URL 창 → 메뉴 → 목록 복귀 순으로 닫기
+  - 창 가장자리 드래그로 크기 자유 조절 (메뉴의 '기본 크기'로 복원)
+
+저장:
+  창 크기/위치, 항상 위, 음소거, 재생 목록, 마지막 영상 등 모든 설정이
+  ~/.yt_mini_profile/config.json 에 저장되어 재실행 후에도 유지됨.
 
 로그인:
   크롬 로그인과는 별개(WebView2 자체 프로필 사용). YT 홈/구독 창에서
@@ -24,10 +29,31 @@
 import json
 import os
 import tempfile
+import threading
 
 import webview
 
 BASE_W, BASE_H = 194, 110
+
+PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".yt_mini_profile")
+CONFIG_PATH = os.path.join(PROFILE_DIR, "config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(cfg):
+    try:
+        os.makedirs(PROFILE_DIR, exist_ok=True)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 VIDEOS = [
     {"title": "lofi hip hop radio", "id": "jfKfPfyJRdk"},
@@ -173,12 +199,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div id="toast"></div>
 <script>
   const videos = __VIDEOS__;
-  let idx = 0;
+  const saved = __STATE__;   // 지난 실행에서 저장된 설정
+  let idx = Math.max(0, Math.min(saved.idx || 0, videos.length - 1));
   let inPlay = false;
   let playing = false;
-  let muted = true;      // 자동재생 정책 때문에 음소거로 시작
-  let onTop = true;
-  let scale = 1;
+  let muted = saved.muted !== false;   // 기본 음소거 (자동재생 정책)
+  let onTop = saved.onTop !== false;
+  let scale = saved.scale === 2 ? 2 : 1;
   let downX = 0, downY = 0, menuWasOpen = false;
 
   const $title = document.getElementById('title');
@@ -203,9 +230,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     toastTimer = setTimeout(() => { $toast.style.opacity = '0'; }, 1800);
   }
 
+  // 설정 변경을 파이썬 쪽에 저장 (연속 변경은 묶어서)
+  let stateTimer = null;
+  function pushState() {
+    clearTimeout(stateTimer);
+    stateTimer = setTimeout(() => {
+      const a = api(); if (!a) return;
+      a.save_ui_state({muted: muted, onTop: onTop, scale: scale, idx: idx, videos: videos});
+    }, 300);
+  }
+
   function render() {
     $title.textContent = videos[idx].title;
     $index.textContent = (idx + 1) + '/' + videos.length;
+    pushState();
   }
 
   function loadVideo() {
@@ -230,6 +268,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     $player.style.display = 'block';
     $overlay.style.display = 'block';
     loadVideo();
+    pushState();
   }
 
   function stop() {
@@ -254,17 +293,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   function toggleMute() {
     ytCmd(muted ? 'unMute' : 'mute');
     muted = !muted;
+    pushState();
   }
 
   function toggleOnTop() {
     onTop = !onTop;
     const a = api(); if (a) a.set_on_top(onTop);
     toast(onTop ? '항상 위: 켜짐' : '항상 위: 꺼짐');
+    pushState();
   }
 
   function toggleScale() {
     scale = scale === 1 ? 2 : 1;
     const a = api(); if (a) a.set_scale(scale);
+    pushState();
   }
 
   function fullscreen() { const a = api(); if (a) a.fullscreen(); }
@@ -331,7 +373,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     items.push(['&#128250; 구독 목록', () => openBrowser('subs')]);
     items.push(['&#11015; 브라우저&rarr;미니', grabFromBrowser]);
     items.push([(onTop ? '&#10003; ' : '') + '항상 위', toggleOnTop]);
-    items.push([scale === 1 ? '크기 2배' : '크기 1배', toggleScale]);
+    items.push([scale === 1 ? '크기 2배' : '기본 크기', toggleScale]);
     items.push(['전체화면', fullscreen]);
     items.push(['&#8212; 최소화', minimize]);
     items.push(['&#10005; 종료', quit]);
@@ -360,6 +402,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   document.addEventListener('contextmenu', e => {
     e.preventDefault();
     closeUrlBox();
+    if (menuVisible()) { hideMenu(); return; }   // 우클릭 다시 누르면 닫기
     showMenu(e.clientX, e.clientY);
   });
 
@@ -421,9 +464,37 @@ class Api:
     # 주의: pywebview 는 js_api 의 공개 속성을 재귀 탐색해 JS 에 노출하므로
     # 창 객체는 반드시 밑줄(_) 접두사 속성에 보관해야 한다.
     # (공개 속성에 두면 window.native... 무한 재귀 오류 발생)
-    def __init__(self):
+    def __init__(self, config=None):
         self._window = None
         self._browser = None
+        self._config = config if isinstance(config, dict) else {}
+        self._save_timer = None
+
+    def _persist_later(self, delay=0.5):
+        if self._save_timer is not None:
+            self._save_timer.cancel()
+        self._save_timer = threading.Timer(delay, save_config, args=(self._config,))
+        self._save_timer.daemon = True
+        self._save_timer.start()
+
+    def save_ui_state(self, state):
+        """JS 쪽 설정(음소거, 항상 위, 목록, 현재 영상 등) 저장."""
+        if isinstance(state, dict):
+            self._config.update(state)
+            self._persist_later()
+
+    def on_geometry_change(self, *args):
+        """창 크기/위치 변경 시 저장 (resized/moved 이벤트)."""
+        try:
+            self._config.update({
+                "width": self._window.width,
+                "height": self._window.height,
+                "x": self._window.x,
+                "y": self._window.y,
+            })
+            self._persist_later()
+        except Exception:
+            pass
 
     def set_on_top(self, flag):
         try:
@@ -432,7 +503,10 @@ class Api:
             pass
 
     def set_scale(self, scale):
-        self._window.resize(BASE_W * int(scale), BASE_H * int(scale))
+        w, h = BASE_W * int(scale), BASE_H * int(scale)
+        self._window.resize(w, h)
+        self._config.update({"width": w, "height": h})
+        self._persist_later()
 
     def fullscreen(self):
         self._window.toggle_fullscreen()
@@ -501,7 +575,19 @@ class Api:
 
 
 def main():
-    html = HTML_TEMPLATE.replace("__VIDEOS__", json.dumps(VIDEOS, ensure_ascii=False))
+    cfg = load_config()
+    videos = cfg.get("videos") or VIDEOS
+    state = {
+        "muted": cfg.get("muted", True),
+        "onTop": cfg.get("onTop", True),
+        "scale": cfg.get("scale", 1),
+        "idx": cfg.get("idx", 0),
+    }
+    html = (
+        HTML_TEMPLATE
+        .replace("__VIDEOS__", json.dumps(videos, ensure_ascii=False))
+        .replace("__STATE__", json.dumps(state, ensure_ascii=False))
+    )
     # YouTube 임베드는 Referer 없는 요청을 오류 153으로 차단하므로,
     # HTML 문자열 대신 파일로 저장해 pywebview 내장 HTTP 서버로 서빙한다.
     tmp_dir = tempfile.mkdtemp(prefix="yt_mini_")
@@ -509,24 +595,33 @@ def main():
     with open(page, "w", encoding="utf-8") as f:
         f.write(html)
 
-    api = Api()
+    api = Api(cfg)
     window = webview.create_window(
         "YT Mini",
         url=page,
         js_api=api,
-        width=BASE_W,
-        height=BASE_H,
-        on_top=True,
-        resizable=False,
+        width=int(cfg.get("width", BASE_W)),
+        height=int(cfg.get("height", BASE_H)),
+        x=cfg.get("x"),
+        y=cfg.get("y"),
+        on_top=bool(state["onTop"]),
+        resizable=True,
+        min_size=(100, 60),
         frameless=True,
         easy_drag=True,
     )
     api._window = window
+    # 창 크기/위치 변경을 저장 (구버전 pywebview 는 moved 이벤트가 없을 수 있음)
+    for event_name in ("resized", "moved"):
+        try:
+            event = getattr(window.events, event_name)
+            event += api.on_geometry_change
+        except Exception:
+            pass
 
     # 로그인 세션(쿠키)을 유지해 홈/구독 창에서 한 번 로그인하면 계속 사용.
-    profile_dir = os.path.join(os.path.expanduser("~"), ".yt_mini_profile")
-    os.makedirs(profile_dir, exist_ok=True)
-    webview.start(http_server=True, private_mode=False, storage_path=profile_dir)
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    webview.start(http_server=True, private_mode=False, storage_path=PROFILE_DIR)
 
 
 if __name__ == "__main__":
