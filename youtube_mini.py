@@ -10,6 +10,9 @@
 재생 중 Esc 또는 좌측 상단 버튼으로 목록 복귀.
 """
 import json
+import os
+import tempfile
+
 import webview
 
 VIDEOS = [
@@ -104,8 +107,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     $player.style.display = 'block';
     $back.classList.add('show');
     $player.innerHTML =
-      '<iframe src="https://www.youtube.com/embed/' + videos[idx].id +
-      '?autoplay=1&mute=1&rel=0" allow="autoplay; encrypted-media" allowfullscreen></iframe>';
+      '<iframe src="https://www.youtube-nocookie.com/embed/' + videos[idx].id +
+      '?autoplay=1&mute=1&rel=0&playsinline=1" ' +
+      'referrerpolicy="strict-origin-when-cross-origin" ' +
+      'allow="autoplay; encrypted-media" allowfullscreen></iframe>';
   }
 
   function stop() {
@@ -139,15 +144,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 def main():
     html = HTML_TEMPLATE.replace("__VIDEOS__", json.dumps(VIDEOS, ensure_ascii=False))
+    # YouTube 임베드는 Referer 없는 요청을 오류 153으로 차단하므로,
+    # HTML 문자열 대신 파일로 저장해 pywebview 내장 HTTP 서버로 서빙한다.
+    tmp_dir = tempfile.mkdtemp(prefix="yt_mini_")
+    page = os.path.join(tmp_dir, "index.html")
+    with open(page, "w", encoding="utf-8") as f:
+        f.write(html)
     webview.create_window(
         "YT Mini",
-        html=html,
+        url=page,
         width=194,
         height=110,
         on_top=True,
         resizable=False,
     )
-    webview.start()
+    webview.start(http_server=True)
 
 
 if __name__ == "__main__":
