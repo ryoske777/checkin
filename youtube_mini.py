@@ -14,8 +14,8 @@
       재생/일시정지, 음소거, 다음/이전 영상, URL 열기,
       YT 홈/구독 별도 창, 항상 위, 크기, 전체화면, 최소화, 종료
   - 다음 영상: 유튜브 자동재생 알고리즘 그대로 (영상 끝나면 자동 진행)
-  - 좌클릭: 영상 클릭에 의한 재생/멈춤 오동작은 차단. 컨트롤바는 사용 가능
-  - 창 이동: 영상 영역을 드래그
+  - 좌클릭 드래그: 창 이동 (화면 아무 곳이나; 투명 실드가 오동작 차단)
+  - 유튜브 자체 컨트롤은 우클릭 메뉴/키보드 단축키(스페이스, m 등)로 조작
   - 크기 조절: 우측 하단 손잡이 드래그 (메뉴 '기본 크기'로 복원)
   - 홈/구독 창에서 영상 클릭: 그 창은 닫히고 미니 플레이어에서 재생
 
@@ -116,6 +116,7 @@ MINI_HOOK_JS = r"""
     '#page-manager { margin:0 !important; }',
     '#movie_player { position:fixed !important; left:0 !important; top:0 !important;',
     '  width:100vw !important; height:100vh !important; z-index:9000 !important; background:#000; }',
+    '#__mini_shield { position:fixed; left:0; top:0; right:0; bottom:0; z-index:9500; }',
     '#__mini_grip { position:fixed; right:0; bottom:0; width:16px; height:16px;',
     '  z-index:10001; cursor:nwse-resize; opacity:0.45; }',
     '#__mini_grip:hover { opacity:1; }',
@@ -150,6 +151,10 @@ MINI_HOOK_JS = r"""
   urlbox.appendChild(urlinput);
   var toastEl = document.createElement('div'); toastEl.id = '__mini_toast';
   var grip = document.createElement('div'); grip.id = '__mini_grip';
+  // 투명 실드: 유튜브 플레이어가 마우스 이벤트를 삼키지 못하게 막고
+  // 좌클릭 드래그(창 이동)/우클릭(메뉴)을 안정적으로 받는다.
+  var shield = document.createElement('div'); shield.id = '__mini_shield';
+  document.documentElement.appendChild(shield);
   document.documentElement.appendChild(menu);
   document.documentElement.appendChild(urlbox);
   document.documentElement.appendChild(toastEl);
@@ -240,17 +245,24 @@ MINI_HOOK_JS = r"""
     showMenu(e.clientX, e.clientY);
   }, true);
 
-  // 영상 좌클릭 재생/멈춤(유튜브 기본 동작)을 차단 — 드래그 오동작 방지.
-  // 컨트롤바 버튼 등은 target 이 video 가 아니므로 그대로 동작한다.
-  ['click', 'dblclick'].forEach(function(t){
-    document.addEventListener(t, function(e){
-      var el = e.target;
-      if (el && (el.tagName === 'VIDEO' ||
-          (el.classList && el.classList.contains('html5-video-container')))){
-        e.preventDefault(); e.stopPropagation();
-      }
-    }, true);
+  // 실드 좌클릭 드래그 = 창 이동
+  var dragging = false, dgX = 0, dgY = 0, dgLast = 0;
+  shield.addEventListener('pointerdown', function(e){
+    if (e.button !== 0) return;
+    e.preventDefault();
+    dragging = true; dgX = e.screenX; dgY = e.screenY; dgLast = 0;
+    var a = api(); if (a) a.begin_move();
+    shield.setPointerCapture(e.pointerId);
   });
+  shield.addEventListener('pointermove', function(e){
+    if (!dragging) return;
+    var now = Date.now();
+    if (now - dgLast < 16) return;
+    dgLast = now;
+    var a = api(); if (a) a.move_delta(e.screenX - dgX, e.screenY - dgY);
+  });
+  shield.addEventListener('pointerup', function(){ dragging = false; });
+  shield.addEventListener('pointercancel', function(){ dragging = false; });
 
   document.addEventListener('click', function(e){
     if (!menu.contains(e.target)) hideMenu();
@@ -292,20 +304,10 @@ MINI_HOOK_JS = r"""
   grip.addEventListener('pointercancel', function(){ resizing = false; });
 
   // 주기 작업: 자동재생(알고리즘 다음 영상) 켜기, 마지막 영상 저장,
-  // 컨트롤바에서는 창 이동(easy_drag)이 발동하지 않게 차단, 플레이어 리사이즈.
+  // 재생 불가 감지, 플레이어 리사이즈.
   setInterval(function(){
     var b = document.querySelector('.ytp-autonav-toggle-button');
     if (b && b.getAttribute('aria-checked') === 'false') b.click();
-
-    var mp = document.querySelector('#movie_player');
-    if (mp && !mp.__miniNoDrag){
-      mp.__miniNoDrag = true;
-      mp.addEventListener('mousedown', function(e){
-        if (e.target.closest &&
-            e.target.closest('.ytp-chrome-bottom,.ytp-settings-menu,.ytp-popup'))
-          e.stopPropagation();
-      });
-    }
 
     // 재생 불가 영상(종료된 라이브 등)이면 안내
     var errEl = document.querySelector('#movie_player .ytp-error');
@@ -372,8 +374,41 @@ class Api:
             pass
 
     def set_on_top(self, flag):
+        flag = bool(flag)
+        self._config.update({"onTop": flag})
+        self._persist_later()
+        # 창 속성(TopMost)은 UI 스레드에서만 변경 가능 — js_api 호출은
+        # 백그라운드 스레드라 직접 만지면 앱이 통째로 죽는다.
         try:
-            self._window.on_top = bool(flag)
+            native = getattr(self._window, "native", None)
+            if native is not None and hasattr(native, "BeginInvoke"):
+                import System  # pythonnet (Windows)
+                native.BeginInvoke(
+                    System.Action(lambda: setattr(native, "TopMost", flag))
+                )
+                return
+        except Exception:
+            pass
+        try:
+            self._window.on_top = flag
+        except Exception:
+            pass
+
+    def begin_move(self):
+        """실드 드래그 시작: 창의 시작 위치를 기억."""
+        try:
+            self._drag_origin = (self._window.x, self._window.y)
+        except Exception:
+            self._drag_origin = (0, 0)
+
+    def move_delta(self, dx, dy):
+        """실드 드래그 중: 시작 위치 + 마우스 이동량으로 창 이동."""
+        try:
+            ox, oy = getattr(self, "_drag_origin", (self._window.x, self._window.y))
+            nx, ny = int(ox + dx), int(oy + dy)
+            self._window.move(nx, ny)
+            self._config.update({"x": nx, "y": ny})
+            self._persist_later()
         except Exception:
             pass
 
@@ -402,12 +437,36 @@ class Api:
     def quit(self):
         self._window.destroy()
 
+    def _browser_geometry(self, bw=1000, bh=650):
+        """미니 창 바로 아래(공간 없으면 위)에 붙는 위치 계산."""
+        try:
+            mx, my = self._window.x, self._window.y
+            mh = self._window.height
+            x, y = mx, my + mh + 6
+            try:
+                s = webview.screens[0]
+                sw, sh = s.width, s.height
+                x = max(0, min(x, sw - bw))
+                if y + bh > sh:
+                    y = my - bh - 6          # 아래 공간이 없으면 위로
+                if y < 0:
+                    y = max(0, sh - bh)
+            except Exception:
+                pass
+            return int(x), int(y)
+        except Exception:
+            return None, None
+
     def open_browser(self, which):
         """YT 홈/구독을 보는 일반 브라우저 창. 이미 열려 있으면 재사용."""
         url = BROWSER_URLS.get(which, BROWSER_URLS["home"])
+        bw, bh = 1000, 650
+        x, y = self._browser_geometry(bw, bh)
         if self._browser is not None and self._browser in webview.windows:
             try:
                 self._browser.load_url(url)
+                if x is not None:
+                    self._browser.move(x, y)
                 self._browser.restore()
                 self._browser.show()
                 return
@@ -417,8 +476,10 @@ class Api:
             "YouTube",
             url=url,
             js_api=self,
-            width=1000,
-            height=650,
+            width=bw,
+            height=bh,
+            x=x,
+            y=y,
             on_top=False,
         )
         # 페이지가 로드될 때마다 클릭 가로채기 스크립트 주입
@@ -497,7 +558,9 @@ def main():
         resizable=True,
         min_size=(100, 60),
         frameless=True,
-        easy_drag=True,
+        # 창 이동은 주입한 실드가 begin_move/move_delta 로 직접 처리
+        # (유튜브 플레이어가 이벤트를 삼켜 easy_drag 는 동작하지 않음)
+        easy_drag=False,
     )
     api._window = window
     # 시청 페이지가 로드될 때마다 미니 UI(CSS/메뉴/손잡이) 주입
