@@ -12,11 +12,11 @@
       YT 홈/구독 별도 창, 브라우저 영상 가져오기,
       항상 위, 크기 2배, 전체화면, 최소화, 종료
   - 홈/구독 창에서 영상 클릭: 그 창은 닫히고 미니 플레이어에서 재생
-  - 재생 중 좌클릭: 재생/일시정지 토글
+  - 재생/일시정지: 우클릭 메뉴에서 (좌클릭 오동작 방지를 위해 메뉴로만)
   - 창 이동: 아무 곳이나 드래그
   - 목록 화면: 휠/좌우 방향키 이동, 클릭/Enter 재생
   - Esc: URL 창 → 메뉴 → 목록 복귀 순으로 닫기
-  - 창 가장자리 드래그로 크기 자유 조절 (메뉴의 '기본 크기'로 복원)
+  - 우측 하단 손잡이를 드래그해 크기 자유 조절 (메뉴 '기본 크기'로 복원)
 
 저장:
   창 크기/위치, 항상 위, 음소거, 재생 목록, 마지막 영상 등 모든 설정이
@@ -145,6 +145,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     position: absolute; inset: 0;
     z-index: 15; display: none;
   }
+  /* 우측 하단 크기 조절 손잡이 */
+  #grip {
+    position: absolute; right: 0; bottom: 0;
+    width: 16px; height: 16px;
+    z-index: 30; cursor: nwse-resize;
+    opacity: 0.45;
+  }
+  #grip::before {
+    content: ''; position: absolute; right: 2px; bottom: 2px;
+    width: 9px; height: 9px;
+    border-right: 2px solid #aaa; border-bottom: 2px solid #aaa;
+  }
+  #grip:hover { opacity: 1; }
   #menu {
     position: fixed; z-index: 100; display: none;
     background: #1e1e1e; border: 1px solid #444; border-radius: 4px;
@@ -194,6 +207,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
   <div id="player"></div>
   <div id="overlay"></div>
+  <div id="grip"></div>
   <div id="menu"></div>
   <div id="urlbox"><input id="urlinput" placeholder="YouTube URL 또는 영상 ID · Enter"></div>
   <div id="toast"></div>
@@ -206,13 +220,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   let muted = saved.muted !== false;   // 기본 음소거 (자동재생 정책)
   let onTop = saved.onTop !== false;
   let scale = saved.scale === 2 ? 2 : 1;
-  let downX = 0, downY = 0, menuWasOpen = false;
 
   const $title = document.getElementById('title');
   const $index = document.getElementById('index');
   const $list = document.getElementById('list');
   const $player = document.getElementById('player');
   const $overlay = document.getElementById('overlay');
+  const $grip = document.getElementById('grip');
   const $menu = document.getElementById('menu');
   const $urlbox = document.getElementById('urlbox');
   const $urlinput = document.getElementById('urlinput');
@@ -406,23 +420,35 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     showMenu(e.clientX, e.clientY);
   });
 
-  document.addEventListener('mousedown', e => {
-    downX = e.clientX; downY = e.clientY;
-    menuWasOpen = menuVisible();
-  });
-
   document.addEventListener('click', e => {
     if (!$menu.contains(e.target)) hideMenu();
     if (urlboxVisible() && !$urlbox.contains(e.target)) closeUrlBox();
   });
 
-  // 재생 중 좌클릭 = 재생/일시정지 (드래그·메뉴 닫기 클릭은 제외)
-  $overlay.addEventListener('click', e => {
-    if (menuWasOpen || urlboxVisible()) return;
-    const moved = Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY);
-    if (moved > 6) return;
-    togglePlay();
+  // 우측 하단 손잡이 드래그로 창 크기 조절
+  let resizing = false, rsX = 0, rsY = 0, rsW = 0, rsH = 0, rsLast = 0;
+  $grip.addEventListener('mousedown', e => {
+    // easy_drag(창 이동)로 이벤트가 넘어가지 않게 차단
+    e.preventDefault(); e.stopPropagation();
   });
+  $grip.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault(); e.stopPropagation();
+    resizing = true;
+    rsX = e.screenX; rsY = e.screenY;
+    rsW = window.innerWidth; rsH = window.innerHeight;
+    $grip.setPointerCapture(e.pointerId);
+  });
+  $grip.addEventListener('pointermove', e => {
+    if (!resizing) return;
+    const now = Date.now();
+    if (now - rsLast < 33) return;   // 호출 폭주 방지
+    rsLast = now;
+    const a = api(); if (!a) return;
+    a.resize_to(rsW + (e.screenX - rsX), rsH + (e.screenY - rsY));
+  });
+  $grip.addEventListener('pointerup', () => { resizing = false; });
+  $grip.addEventListener('pointercancel', () => { resizing = false; });
 
   document.addEventListener('wheel', e => {
     if (!inPlay && !menuVisible() && !urlboxVisible())
@@ -507,6 +533,16 @@ class Api:
         self._window.resize(w, h)
         self._config.update({"width": w, "height": h})
         self._persist_later()
+
+    def resize_to(self, w, h):
+        """우측 하단 손잡이 드래그로 크기 조절."""
+        try:
+            w, h = max(100, int(w)), max(60, int(h))
+            self._window.resize(w, h)
+            self._config.update({"width": w, "height": h})
+            self._persist_later()
+        except Exception:
+            pass
 
     def fullscreen(self):
         self._window.toggle_fullscreen()
