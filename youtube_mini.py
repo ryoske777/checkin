@@ -22,10 +22,11 @@
   - 크기 조절: 우측 하단 손잡이 드래그 (메뉴 '기본 크기'로 복원)
   - 홈/구독 창에서 영상 클릭: 그 창은 닫히고 미니 플레이어에서 재생
   - 카멜레온 모드: 다른 창(브라우저 등) 위에 올려두고 켜면 그 창과
-    현재 탭(창 제목)을 호스트로 기억 — 호스트가 포커스를 잃거나
-    브라우저 탭이 바뀌면 같이 숨고, 기억한 창/탭으로 돌아오면 다시
-    그 위에 나타난다. 호스트 창을 옮기면 상대 위치를 유지하며
-    따라간다 (Windows 전용)
+    현재 탭(창 제목)을 호스트로 기억. 미니 자리가 실제로 다른 창에
+    '가려졌을 때'만 같이 숨는다 — 다른 창이 활성화만 되고 호스트가
+    안 가려졌으면 계속 떠 있음. 브라우저 탭이 바뀌거나 호스트가
+    최소화되면 숨고, 돌아오면 다시 나타난다. 호스트 창을 옮기면
+    상대 위치를 유지하며 따라간다 (Windows 전용)
 
 저장:
   창 크기/위치, 항상 위, 불투명도, 마지막 시청 영상이
@@ -96,8 +97,31 @@ def _user32():
     u.MonitorFromPoint.restype = ctypes.c_void_p
     u.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
     u.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    u.GetTopWindow.restype = ctypes.c_void_p
+    u.GetTopWindow.argtypes = [ctypes.c_void_p]
+    u.GetWindow.restype = ctypes.c_void_p
+    u.GetWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+    u.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
     _USER32 = u
     return u
+
+
+GW_HWNDNEXT = 2
+# 화면을 항상 덮고 있지만 '가림'으로 치지 않는 셸 창들
+_SHELL_CLASSES = {"Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW"}
+
+
+def _is_cloaked(hwnd):
+    """DWM 이 감춘(cloaked) UWP 유령 창인지 — z순서 최상단에 남아 있어 무시 필요."""
+    try:
+        dwm = ctypes.windll.dwmapi
+        val = wintypes.DWORD(0)
+        dwm.DwmGetWindowAttribute(ctypes.c_void_p(hwnd), 14,
+                                  ctypes.byref(val), ctypes.sizeof(val))
+        return val.value != 0
+    except Exception:
+        return False
 
 
 class _MONITORINFO(ctypes.Structure):
@@ -746,6 +770,40 @@ class Api:
             self._cham_host = None
             self._toast("카멜레온 모드를 켤 수 없어요")
 
+    def _host_region_covered(self, u, host, region):
+        """미니가 앉을 영역(region)을 호스트보다 위 z순서의 다른 창이 덮는지.
+
+        z순서를 위에서부터 훑어 호스트에 도달하기 전에, 우리 프로세스가
+        아닌 보이는 창이 영역과 교차하면 '덮임'. 포커스와 무관하게
+        실제 가림 여부만 본다.
+        """
+        try:
+            left, top, right, bottom = region
+            pid_self = os.getpid()
+            hw = u.GetTopWindow(None)
+            for _ in range(2000):        # 안전 상한
+                if not hw:
+                    break
+                hw_i = int(hw)
+                if hw_i == host:
+                    return False         # 호스트 위에는 아무도 없음
+                if u.IsWindowVisible(hw_i) and not _is_cloaked(hw_i):
+                    pid = wintypes.DWORD(0)
+                    u.GetWindowThreadProcessId(ctypes.c_void_p(hw_i), ctypes.byref(pid))
+                    if pid.value != pid_self:
+                        buf = ctypes.create_unicode_buffer(64)
+                        u.GetClassNameW(ctypes.c_void_p(hw_i), buf, 64)
+                        if buf.value not in _SHELL_CLASSES:
+                            r = wintypes.RECT()
+                            u.GetWindowRect(ctypes.c_void_p(hw_i), ctypes.byref(r))
+                            if not (r.right <= left or r.left >= right
+                                    or r.bottom <= top or r.top >= bottom):
+                                return True
+                hw = u.GetWindow(ctypes.c_void_p(hw_i), GW_HWNDNEXT)
+            return False
+        except Exception:
+            return False
+
     def _cham_loop(self):
         """호스트 창의 포커스/위치를 따라 미니 창을 보이고·숨기고·이동."""
         u = _user32()
@@ -766,35 +824,35 @@ class Api:
                     self._toast("호스트 창이 닫혀 카멜레온 모드를 껐어요")
                     continue
 
-                fg = u.GetForegroundWindow()
-                fg_root = int(u.GetAncestor(fg, GA_ROOT) or 0) if fg else 0
-                ours = {h for h in (
-                    self._hwnd_of(self._window),
-                    self._hwnd_of(self._menu) if self._menu else None,
-                    self._hwnd_of(self._browser) if self._browser else None,
-                ) if h}
-                visible = (fg_root == host) or (fg_root in ours)
+                mini_shown = bool(u.IsWindowVisible(mini))
+                rect = wintypes.RECT()
+                u.GetWindowRect(host, ctypes.byref(rect))
+                cur = (self._window.x, self._window.y)
+                # 유저가 미니를 직접 옮겼으면 상대 위치 재계산
+                if (mini_shown and self._cham_last_set is not None
+                        and cur != self._cham_last_set):
+                    self._cham_offset = (cur[0] - rect.left, cur[1] - rect.top)
+                expect = (rect.left + self._cham_offset[0],
+                          rect.top + self._cham_offset[1])
+
+                # 표시 여부는 포커스가 아니라 '실제로 가려졌는가' 기준:
+                # 다른 창이 활성화만 된 경우(호스트가 안 가려짐)엔 계속 떠 있고,
+                # 미니 자리를 실제로 덮는 창이 호스트 위로 오면 같이 숨는다.
+                visible = True
                 if u.IsIconic(host):
                     visible = False
-                # 같은 창이라도 탭(창 제목)이 바뀌면 숨기고,
-                # 기억한 탭으로 돌아오면 다시 표시
-                if visible and self._cham_title:
-                    if _norm_title(_win_title(u, host)) != self._cham_title:
+                elif self._cham_title and _norm_title(_win_title(u, host)) != self._cham_title:
+                    visible = False    # 브라우저 탭이 바뀜
+                else:
+                    region = (expect[0], expect[1],
+                              expect[0] + self._window.width,
+                              expect[1] + self._window.height)
+                    if self._host_region_covered(u, host, region):
                         visible = False
 
                 # 플래그가 아니라 실제 표시 상태 기준으로 동기화 —
                 # 한 번 어긋나도 다음 주기(0.25s)에 반드시 복구된다.
-                mini_shown = bool(u.IsWindowVisible(mini))
                 if visible:
-                    rect = wintypes.RECT()
-                    u.GetWindowRect(host, ctypes.byref(rect))
-                    cur = (self._window.x, self._window.y)
-                    # 유저가 미니를 직접 옮겼으면 상대 위치 재계산
-                    if (mini_shown and self._cham_last_set is not None
-                            and cur != self._cham_last_set):
-                        self._cham_offset = (cur[0] - rect.left, cur[1] - rect.top)
-                    expect = (rect.left + self._cham_offset[0],
-                              rect.top + self._cham_offset[1])
                     if not mini_shown or cur != expect:
                         # 표시 + 위치 + 최상위 z순서를 한 번에 복구 (포커스는 안 뺏음)
                         u.SetWindowPos(mini, HWND_TOPMOST, expect[0], expect[1], 0, 0,
