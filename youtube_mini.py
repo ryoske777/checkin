@@ -78,13 +78,21 @@ _USER32 = None
 
 
 def _user32():
-    """Win32 user32 (카멜레온 모드용). Windows 가 아니면 None."""
+    """우리 전용 user32 인스턴스. Windows 가 아니면 None.
+
+    주의: ctypes.windll.user32 는 프로세스 전체가 공유하는 객체라
+    여기에 argtypes 를 설정하면 pywebview 내부의 SetWindowPos 호출까지
+    깨져 ctypes.ArgumentError 가 쏟아진다. 반드시 별도 WinDLL 인스턴스를
+    만들어 우리 시그니처가 밖으로 새지 않게 한다.
+    """
     global _USER32
     if _USER32 is not None:
         return _USER32
+    if not hasattr(ctypes, "WinDLL"):
+        return None
     try:
-        u = ctypes.windll.user32
-    except AttributeError:
+        u = ctypes.WinDLL("user32")
+    except Exception:
         return None
     u.WindowFromPoint.restype = ctypes.c_void_p
     u.WindowFromPoint.argtypes = [wintypes.POINT]
@@ -112,6 +120,9 @@ def _user32():
     u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
     u.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
     u.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+    u.FindWindowW.restype = ctypes.c_void_p
+    u.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+    u.MessageBoxW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
     _USER32 = u
     return u
 
@@ -558,6 +569,7 @@ MENU_HTML = r"""<!DOCTYPE html>
     ['ontop',      function(){ return (st.onTop ? '✓ ' : '') + '항상 위'; }],
     ['cham',       function(){ return (st.cham ? '✓ ' : '') + '카멜레온 모드'; }],
     ['still',      function(){ return (st.still ? '✓ ' : '') + '스틸컷 재생'; }],
+    ['logs',       function(){ return '로그 보기'; }],
     ['scale2',     function(){ return '크기 2배'; }],
     ['scale1',     function(){ return '기본 크기'; }],
     ['fullscreen', function(){ return '전체화면'; }],
@@ -642,6 +654,7 @@ class Api:
         self._browser = None
         self._menu = None
         self._menu_open = False
+        self._logwin = None
         self._engine_ok = False   # loaded 이벤트 수신 = WebView2 정상
         self._menu_w, self._menu_h = MENU_W, MENU_H
         self._config = config if isinstance(config, dict) else {}
@@ -1029,6 +1042,9 @@ class Api:
                 frameless=True,
                 on_top=True,
                 resizable=False,
+                # 프레임리스 기본값이 easy_drag=True 라 pywebview 내부
+                # 이동 호출이 발생함 — 메뉴는 이동할 일이 없으니 끈다
+                easy_drag=False,
             )
             try:
                 self._menu = webview.create_window("menu", focus=False, **kwargs)
@@ -1174,6 +1190,8 @@ class Api:
                 self.set_on_top(not self._config.get("onTop", True))
             elif name == "cham":
                 self.toggle_chameleon()
+            elif name == "logs":
+                self.show_logs()
             elif name == "still":
                 on = not self._config.get("stillOn", False)
                 self._config.update({"stillOn": on})
@@ -1195,6 +1213,38 @@ class Api:
                 self.quit()
         except Exception:
             pass
+
+    def show_logs(self):
+        """로그 파일(mini.log)을 보여주는 창. 오류 진단용 인터페이스."""
+        import html as _html
+        try:
+            with open(os.path.join(PROFILE_DIR, "mini.log"), encoding="utf-8") as f:
+                lines = f.readlines()[-400:]
+            text = "".join(lines).strip() or "(로그가 비어 있어요)"
+        except Exception:
+            text = "(아직 로그 파일이 없어요)"
+        page = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
+            "body{background:#111;color:#ddd;font:12px Consolas,monospace;"
+            "padding:10px;white-space:pre-wrap;word-break:break-all;}"
+            "h3{color:#fff;font:13px sans-serif;margin-bottom:8px;}"
+            "</style></head><body><h3>YT Mini 로그 ("
+            + _html.escape(os.path.join(PROFILE_DIR, "mini.log"))
+            + ")</h3>" + _html.escape(text) + "</body></html>"
+        )
+        if self._logwin is not None and self._logwin in webview.windows:
+            try:
+                self._logwin.load_html(page)
+                self._logwin.restore()
+                self._logwin.show()
+                return
+            except Exception:
+                pass
+        try:
+            self._logwin = webview.create_window(
+                "YT Mini 로그", html=page, width=720, height=480, on_top=False)
+        except Exception as e:
+            _log_file("show_logs failed: %r" % (e,))
 
     # ---- 홈/구독 브라우저 창 ----
 
@@ -1354,15 +1404,14 @@ def _single_instance():
             return True
         # 이미 실행 중 → 기존 창(숨어 있어도)을 표시하고 앞으로
         try:
-            u = ctypes.windll.user32
-            u.FindWindowW.restype = ctypes.c_void_p
-            hwnd = u.FindWindowW(None, "YT Mini")
-            if hwnd:
-                u.ShowWindow(ctypes.c_void_p(hwnd), SW_SHOWNOACTIVATE)
-                u.SetWindowPos(ctypes.c_void_p(hwnd), HWND_TOPMOST, 0, 0, 0, 0,
+            u = _user32()
+            hwnd = u.FindWindowW(None, "YT Mini") if u else None
+            if u and hwnd:
+                u.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+                u.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
                                | SWP_SHOWWINDOW)
-            else:
+            elif u:
                 # 창 없는 좀비 프로세스 — 사용자가 직접 정리해야 함
                 u.MessageBoxW(
                     None,
@@ -1454,9 +1503,8 @@ def _engine_watchdog(api):
     if api._engine_ok:
         return
     _log_file("engine watchdog: no loaded event in 20s (WebView2 init failure)")
-    try:
-        u = ctypes.windll.user32
-    except AttributeError:
+    u = _user32()
+    if u is None:
         return
     count = int(api._config.get("udfResetCount", 0))
     if count >= 2:
@@ -1565,6 +1613,19 @@ def main():
     _enable_dpi_awareness()
     # 더블클릭 실행 시 뜨는 콘솔 창 숨김
     _hide_own_console()
+    # pywebview 내부 오류도 로그 파일에 수집 — 콘솔 없는 exe 에서도
+    # 우클릭 메뉴의 '로그 보기'로 확인할 수 있다
+    try:
+        import logging
+        os.makedirs(PROFILE_DIR, exist_ok=True)
+        handler = logging.FileHandler(
+            os.path.join(PROFILE_DIR, "mini.log"), encoding="utf-8")
+        handler.setLevel(logging.WARNING)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s",
+                                               datefmt="%H:%M:%S"))
+        logging.getLogger("pywebview").addHandler(handler)
+    except Exception:
+        pass
     # 사용자 클릭 없이도 소리 있는 자동재생을 허용 (WebView2 전용 플래그)
     os.environ.setdefault(
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
