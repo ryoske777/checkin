@@ -1110,12 +1110,36 @@ def _hide_own_console():
         pass
 
 
+def _keep_topmost(api):
+    """'항상 위'가 켜져 있는 동안 최상위 z순서를 주기적으로 재단언.
+
+    작업표시줄도 최상위 창이라 클릭하면 그 위로 올라오는데, 재단언으로
+    미니 창이 작업표시줄까지 덮은 상태를 유지한다.
+    """
+    u = _user32()
+    if u is None:
+        return
+    while True:
+        time.sleep(0.7)
+        try:
+            if not api._config.get("onTop", True):
+                continue
+            mh = api._hwnd_of(api._window)
+            if mh and u.IsWindowVisible(mh):
+                u.SetWindowPos(mh, HWND_TOPMOST, 0, 0, 0, 0,
+                               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        except Exception:
+            pass
+
+
 def _keep_mini_injected(api):
     """미니 UI 주입 자가치유 루프.
 
     loaded 이벤트를 놓치거나 주입 스크립트가 실패해도 2초마다 재시도한다.
     스크립트 자체가 __miniHooked 가드로 멱등이라 중복 주입은 무해하다.
     """
+    t = threading.Thread(target=_keep_topmost, args=(api,), daemon=True)
+    t.start()
     # 시작 시 저장된 불투명도 적용
     try:
         api._apply_opacity(int(api._config.get("opacity", 100)))
