@@ -123,8 +123,14 @@ def _user32():
     u.FindWindowW.restype = ctypes.c_void_p
     u.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
     u.MessageBoxW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+    u.GetAsyncKeyState.restype = ctypes.c_short
+    u.GetAsyncKeyState.argtypes = [ctypes.c_int]
+    u.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
     _USER32 = u
     return u
+
+
+VK_LBUTTON, VK_RBUTTON = 1, 2
 
 
 WM_NCLBUTTONDOWN, HTCAPTION = 0x00A1, 2
@@ -629,16 +635,15 @@ MENU_HTML = r"""<!DOCTYPE html>
     if (reportSize()) clearInterval(sizeTimer);
   }, 200);
 
-  // 메뉴 밖으로 마우스가 나가면 잠시 후 닫기, Esc 로도 닫기
-  var leaveTimer = null;
-  document.addEventListener('mouseleave', function(){
-    leaveTimer = setTimeout(function(){ var a = api(); if (a) a.hide_menu(); }, 600);
-  });
-  document.addEventListener('mouseenter', function(){ clearTimeout(leaveTimer); });
+  // 마우스가 벗어나도 닫지 않는다 — 닫기는 바깥 클릭(파이썬 쪽 전역 감시),
+  // 메뉴 위 우클릭, 항목 선택, Esc 로만.
   document.addEventListener('keydown', function(e){
     if (e.key === 'Escape'){ var a = api(); if (a) a.hide_menu(); }
   });
-  document.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+  document.addEventListener('contextmenu', function(e){
+    e.preventDefault();
+    var a = api(); if (a) a.hide_menu();
+  });
 </script>
 </body>
 </html>
@@ -1151,9 +1156,50 @@ class Api:
                 except Exception:
                     pass
                 self._menu.move(x, y)
+            # 바깥 클릭 감시 시작 (마우스 이동만으로는 닫히지 않음)
+            t = threading.Thread(target=self._menu_outside_watch, daemon=True)
+            t.start()
         except Exception as e:
             self._menu_open = False
             _log_file("show_menu failed: %r" % (e,))
+
+    def _menu_outside_watch(self):
+        """메뉴가 열려 있는 동안 바깥 클릭을 전역 감시해 닫는다.
+
+        메뉴 창은 포커스를 받지 않아(NOACTIVATE) 블러 이벤트가 없으므로
+        마우스 버튼 + 커서 위치를 폴링한다. 메뉴를 연 우클릭이 떼질
+        때까지 기다린 뒤 감시를 시작한다.
+        """
+        u = _user32()
+        if u is None:
+            return
+        try:
+            def any_button():
+                return ((u.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
+                        or (u.GetAsyncKeyState(VK_RBUTTON) & 0x8000))
+
+            while any_button():          # 메뉴를 연 클릭이 떼질 때까지
+                time.sleep(0.03)
+            while self._menu_open:
+                time.sleep(0.08)
+                if not any_button():
+                    continue
+                pt = wintypes.POINT()
+                u.GetCursorPos(ctypes.byref(pt))
+                mh = self._hwnd_of(self._menu)
+                if not mh:
+                    return
+                r = wintypes.RECT()
+                u.GetWindowRect(mh, ctypes.byref(r))
+                if r.left <= pt.x < r.right and r.top <= pt.y < r.bottom:
+                    # 메뉴 안 클릭(항목 선택 등) — 떼질 때까지 기다렸다 계속
+                    while any_button():
+                        time.sleep(0.03)
+                    continue
+                self.hide_menu()         # 바깥 클릭 → 닫기
+                return
+        except Exception:
+            pass
 
     def hide_menu(self):
         self._menu_open = False
