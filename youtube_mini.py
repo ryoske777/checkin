@@ -1325,6 +1325,51 @@ class Api:
             pass
 
 
+_MUTEX = None
+
+
+def _single_instance():
+    """중복 실행 방지. 두 인스턴스가 같은 WebView2 프로필을 잡으면
+    두 번째가 흰 창(엔진 초기화 실패)만 뜨므로, 이미 실행 중이면
+    기존 창을 앞으로 가져오고 False 를 반환한다."""
+    global _MUTEX
+    try:
+        k = ctypes.windll.kernel32
+    except AttributeError:
+        return True  # Windows 가 아님
+    try:
+        k.SetLastError(0)
+        _MUTEX = k.CreateMutexW(None, False, "YTMini_SingleInstance")
+        if k.GetLastError() != 183:      # ERROR_ALREADY_EXISTS
+            return True
+        # 이미 실행 중 → 기존 창(숨어 있어도)을 표시하고 앞으로
+        try:
+            u = ctypes.windll.user32
+            u.FindWindowW.restype = ctypes.c_void_p
+            hwnd = u.FindWindowW(None, "YT Mini")
+            if hwnd:
+                u.ShowWindow(ctypes.c_void_p(hwnd), SW_SHOWNOACTIVATE)
+                u.SetWindowPos(ctypes.c_void_p(hwnd), HWND_TOPMOST, 0, 0, 0, 0,
+                               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                               | SWP_SHOWWINDOW)
+            else:
+                # 창 없는 좀비 프로세스 — 사용자가 직접 정리해야 함
+                u.MessageBoxW(
+                    None,
+                    "YT Mini 가 이미 실행 중이지만 창을 찾을 수 없습니다.\n"
+                    "작업 관리자에서 YTMini.exe / python 프로세스를 종료한 뒤 "
+                    "다시 실행해 주세요.",
+                    "YT Mini",
+                    0x40,  # MB_ICONINFORMATION
+                )
+        except Exception:
+            pass
+        _log_file("already running - second instance exited")
+        return False
+    except Exception:
+        return True
+
+
 def _enable_dpi_awareness():
     """프로세스를 DPI 인식으로 설정 (창 생성 전에 호출).
 
@@ -1442,6 +1487,10 @@ def _keep_mini_injected(api):
 
 
 def main():
+    # 중복 실행이면 종료 — 두 인스턴스가 같은 WebView2 프로필을 잡으면
+    # 두 번째가 0x8007139F(컨트롤러 생성 실패)로 흰 창만 뜬다.
+    if not _single_instance():
+        return
     # DPI 인식은 어떤 창보다 먼저 설정해야 한다 (exe 좌표 어긋남 방지)
     _enable_dpi_awareness()
     # 더블클릭 실행 시 뜨는 콘솔 창 숨김
