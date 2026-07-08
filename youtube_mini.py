@@ -798,6 +798,21 @@ class Api:
             t = threading.Timer(delay, self._on_menu_shown)
             t.daemon = True
             t.start()
+        # 작업표시줄에 'menu' 항목이 생기지 않게 (네이티브 준비 후 적용)
+        t = threading.Timer(1.2, self._menu_no_taskbar)
+        t.daemon = True
+        t.start()
+
+    def _menu_no_taskbar(self):
+        try:
+            native = getattr(self._menu, "native", None)
+            if native is not None and hasattr(native, "BeginInvoke"):
+                import System  # pythonnet (Windows)
+                native.BeginInvoke(
+                    System.Action(lambda: setattr(native, "ShowInTaskbar", False))
+                )
+        except Exception as e:
+            _log_file("menu_no_taskbar failed: %r" % (e,))
 
     def _on_menu_shown(self, window=None):
         if self._menu_open:
@@ -872,23 +887,38 @@ class Api:
                 )
             except Exception:
                 pass
-            # 생성 시 1x1 이었을 수 있으니 실측 크기로 보정 후 이동
-            try:
-                self._menu.resize(self._menu_w, self._menu_h)
-            except Exception:
-                pass
-            self._menu.move(x, y)
             # shown 이벤트 가드(_on_menu_shown)가 닫아버리지 않도록 먼저 표시 상태 기록
             self._menu_open = True
-            self._menu.show()
-        except Exception:
-            pass
+            # 숨김 상태의 창에는 pywebview move 가 적용되지 않는 경우가 있어
+            # SetWindowPos 로 위치+크기+표시+최상위를 한 번에 처리한다.
+            u = _user32()
+            mh = self._hwnd_of(self._menu)
+            if u is not None and mh:
+                u.SetWindowPos(mh, HWND_TOPMOST, x, y, self._menu_w, self._menu_h,
+                               SWP_NOACTIVATE | SWP_SHOWWINDOW)
+            else:
+                try:
+                    self._menu.resize(self._menu_w, self._menu_h)
+                except Exception:
+                    pass
+                self._menu.move(x, y)
+                self._menu.show()
+        except Exception as e:
+            self._menu_open = False
+            _log_file("show_menu failed: %r" % (e,))
 
     def hide_menu(self):
         self._menu_open = False
         try:
             if self._menu is not None and self._menu in webview.windows:
-                self._menu.hide()
+                # SetWindowPos 로 표시한 창은 WinForms 의 표시 상태 캐시와
+                # 어긋날 수 있어 네이티브로 직접 숨긴다.
+                u = _user32()
+                mh = self._hwnd_of(self._menu)
+                if u is not None and mh:
+                    u.ShowWindow(mh, SW_HIDE)
+                else:
+                    self._menu.hide()
         except Exception:
             pass
 
