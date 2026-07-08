@@ -22,6 +22,8 @@
       재생/일시정지, 음소거, 다음/이전 영상, URL 열기,
       YT 홈/구독, 항상 위, 크기, 전체화면, 최소화, 종료, 불투명도 슬라이더
   - 다음 영상: 유튜브 자동재생 알고리즘 그대로 (영상 끝나면 자동 진행)
+  - 스틸컷 재생: 화면을 N초(1~10, 메뉴 슬라이더)마다 갱신되는
+    정지화면으로 표시 — 소리/재생은 계속 진행 (설정 저장됨)
   - 좌클릭 드래그: 창 이동 (화면 아무 곳이나; 투명 실드가 오동작 차단)
   - 유튜브 자체 컨트롤은 우클릭 메뉴/키보드 단축키(스페이스, m 등)로 조작
   - 크기 조절: 우측 하단 손잡이 드래그 (메뉴 '기본 크기'로 복원)
@@ -51,7 +53,7 @@ from ctypes import wintypes
 
 import webview
 
-BASE_W, BASE_H = 194, 110
+BASE_W, BASE_H = 226, 126   # 최초 실행 기본 크기 (이후엔 저장된 크기 사용)
 # 크기 조절 하한 — 가로/세로 모두 극한까지. 우측 하단 손잡이(16px)를
 # 다시 잡아 되돌릴 수 있는 최소한의 크기만 남긴다.
 MIN_W, MIN_H = 24, 20
@@ -117,8 +119,20 @@ WM_NCLBUTTONDOWN, HTCAPTION = 0x00A1, 2
 
 
 GW_HWNDNEXT = 2
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x20, 0x80, 0x08000000
 # 화면을 항상 덮고 있지만 '가림'으로 치지 않는 셸 창들
 _SHELL_CLASSES = {"Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW"}
+
+
+def _ex_style(u, hwnd):
+    try:
+        return int(u.GetWindowLongPtrW(ctypes.c_void_p(hwnd), GWL_EXSTYLE))
+    except Exception:
+        try:
+            return int(u.GetWindowLongW(ctypes.c_void_p(hwnd), GWL_EXSTYLE))
+        except Exception:
+            return 0
 
 
 def _is_cloaked(hwnd):
@@ -283,6 +297,8 @@ MINI_HOOK_JS = r"""
     '#movie_player { position:fixed !important; left:0 !important; top:0 !important;',
     '  width:100vw !important; height:100vh !important; z-index:9000 !important; background:#000; }',
     '#__mini_shield { position:fixed; left:0; top:0; right:0; bottom:0; z-index:9500; }',
+    '#__mini_still { position:fixed; left:0; top:0; width:100%; height:100%;',
+    '  z-index:9400; display:none; background:#000; }',
     '#__mini_grip { position:fixed; right:0; bottom:0; width:16px; height:16px;',
     '  z-index:10001; cursor:nwse-resize; opacity:0.45; }',
     '#__mini_grip:hover { opacity:1; }',
@@ -310,6 +326,8 @@ MINI_HOOK_JS = r"""
   urlbox.appendChild(urlinput);
   var toastEl = document.createElement('div'); toastEl.id = '__mini_toast';
   var grip = document.createElement('div'); grip.id = '__mini_grip';
+  var still = document.createElement('canvas'); still.id = '__mini_still';
+  document.documentElement.appendChild(still);
   document.documentElement.appendChild(shield);
   document.documentElement.appendChild(urlbox);
   document.documentElement.appendChild(toastEl);
@@ -349,12 +367,47 @@ MINI_HOOK_JS = r"""
   }
   function closeUrl(){ urlbox.style.display = 'none'; }
 
+  // ---- 스틸컷 재생: N초마다 현재 프레임을 캔버스에 캡처해 정지화면처럼 표시.
+  //      영상(소리 포함)은 뒤에서 계속 재생된다.
+  var stillTimer = null, stillOn = false, stillSec = 10;
+  function drawStill(){
+    var v = vid();
+    if (!v || !v.videoWidth) return;
+    var w = innerWidth, h = innerHeight;
+    if (still.width !== w) still.width = w;
+    if (still.height !== h) still.height = h;
+    var ctx = still.getContext('2d');
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, w, h);
+    var s = Math.min(w / v.videoWidth, h / v.videoHeight);
+    var dw = v.videoWidth * s, dh = v.videoHeight * s;
+    try { ctx.drawImage(v, (w - dw) / 2, (h - dh) / 2, dw, dh); } catch (err) {}
+  }
+  function setStill(on, sec){
+    stillOn = !!on;
+    if (sec) stillSec = Math.max(1, Math.min(10, sec | 0));
+    clearInterval(stillTimer); stillTimer = null;
+    if (stillOn){
+      still.style.display = 'block';
+      drawStill();
+      stillTimer = setInterval(drawStill, stillSec * 1000);
+      toast('스틸컷 재생: ' + stillSec + '초 간격');
+    } else {
+      still.style.display = 'none';
+      toast('스틸컷 재생: 꺼짐');
+    }
+  }
+
   // 파이썬(팝업 메뉴 창)에서 호출할 수 있게 노출
   window.__mini = {
     togglePlay: togglePlay, toggleMute: toggleMute,
     nextVideo: nextVideo, prevVideo: prevVideo,
-    openUrl: openUrl, toast: toast
+    openUrl: openUrl, toast: toast, setStill: setStill
   };
+
+  // 저장된 스틸컷 설정 복원
+  var stillCfg = __STILL__;
+  if (stillCfg && stillCfg.on) setStill(true, stillCfg.sec);
 
   // 우클릭 → 커서 위치(물리 좌표)에 별도 팝업 메뉴 창
   document.addEventListener('contextmenu', function(e){
@@ -482,8 +535,8 @@ MENU_HTML = r"""<!DOCTYPE html>
   #g { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 5px; }
   .mi { padding: 6px 9px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
   .mi:hover { background: #ff5252; }
-  #op { grid-column: 1 / span 2; padding: 4px 9px 6px; }
-  #op label { font-size: 11px; opacity: 0.8; display: block; margin-bottom: 2px; }
+  #op, #sop { grid-column: 1 / span 2; padding: 4px 9px 6px; }
+  #op label, #sop label { font-size: 11px; opacity: 0.8; display: block; margin-bottom: 2px; }
   input[type=range] { width: 100%; }
 </style>
 </head>
@@ -491,7 +544,8 @@ MENU_HTML = r"""<!DOCTYPE html>
 <div id="g"></div>
 <script>
   var api = function(){ return (window.pywebview && window.pywebview.api) || null; };
-  var st = { playing: false, muted: false, onTop: true, opacity: 100, cham: false };
+  var st = { playing: false, muted: false, onTop: true, opacity: 100,
+             cham: false, still: false, stillSec: 10 };
   var items = [
     ['play',       function(){ return st.playing ? '⏸ 일시정지' : '▶ 재생'; }],
     ['mute',       function(){ return st.muted ? '소리 켜기' : '음소거'; }],
@@ -502,6 +556,7 @@ MENU_HTML = r"""<!DOCTYPE html>
     ['subs',       function(){ return '구독 목록'; }],
     ['ontop',      function(){ return (st.onTop ? '✓ ' : '') + '항상 위'; }],
     ['cham',       function(){ return (st.cham ? '✓ ' : '') + '카멜레온 모드'; }],
+    ['still',      function(){ return (st.still ? '✓ ' : '') + '스틸컷 재생'; }],
     ['scale2',     function(){ return '크기 2배'; }],
     ['scale1',     function(){ return '기본 크기'; }],
     ['fullscreen', function(){ return '전체화면'; }],
@@ -525,12 +580,24 @@ MENU_HTML = r"""<!DOCTYPE html>
   });
   op.appendChild(lb); op.appendChild(rg); g.appendChild(op);
 
+  var sop = document.createElement('div'); sop.id = 'sop';
+  var slb = document.createElement('label');
+  var srg = document.createElement('input');
+  srg.type = 'range'; srg.min = 1; srg.max = 10; srg.value = 10;
+  srg.addEventListener('input', function(){
+    slb.textContent = '스틸컷 간격 ' + srg.value + '초';
+    var a = api(); if (a) a.set_still_sec(parseInt(srg.value, 10));
+  });
+  sop.appendChild(slb); sop.appendChild(srg); g.appendChild(sop);
+
   function refresh(){
     items.forEach(function(it){
       document.getElementById('mi_' + it[0]).textContent = it[1]();
     });
     rg.value = st.opacity;
     lb.textContent = '불투명도 ' + st.opacity + '%';
+    srg.value = st.stillSec;
+    slb.textContent = '스틸컷 간격 ' + st.stillSec + '초';
   }
   function setState(s){ st = Object.assign(st, s || {}); refresh(); }
   window.setState = setState;
@@ -642,6 +709,22 @@ class Api:
             self._window.on_top = flag
         except Exception:
             pass
+
+    def set_still_sec(self, sec):
+        """스틸컷 갱신 간격 (1~10초)."""
+        try:
+            sec = max(1, min(10, int(sec)))
+        except Exception:
+            return
+        self._config.update({"stillSec": sec})
+        self._persist_later()
+        if self._config.get("stillOn", False):
+            try:
+                self._window.evaluate_js(
+                    "window.__mini && __mini.setStill(true, %d)" % sec
+                )
+            except Exception:
+                pass
 
     def set_opacity(self, pct):
         """불투명도 슬라이더 (20~100%)."""
@@ -830,15 +913,23 @@ class Api:
                 if u.IsWindowVisible(hw_i) and not _is_cloaked(hw_i):
                     pid = wintypes.DWORD(0)
                     u.GetWindowThreadProcessId(ctypes.c_void_p(hw_i), ctypes.byref(pid))
-                    if pid.value != pid_self:
+                    ex = _ex_style(u, hw_i)
+                    # 툴팁/알림/클릭 통과 오버레이 같은 보조 창은 가림으로 안 침
+                    if (pid.value != pid_self
+                            and not (ex & (WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW
+                                           | WS_EX_NOACTIVATE))):
                         buf = ctypes.create_unicode_buffer(64)
                         u.GetClassNameW(ctypes.c_void_p(hw_i), buf, 64)
                         if buf.value not in _SHELL_CLASSES:
                             r = wintypes.RECT()
                             u.GetWindowRect(ctypes.c_void_p(hw_i), ctypes.byref(r))
-                            if not (r.right <= left or r.left >= right
-                                    or r.bottom <= top or r.top >= bottom):
-                                return True
+                            # 실제로 미니 영역의 30% 이상을 덮을 때만 '가림'
+                            ix = min(r.right, right) - max(r.left, left)
+                            iy = min(r.bottom, bottom) - max(r.top, top)
+                            if ix > 0 and iy > 0:
+                                area = (right - left) * (bottom - top)
+                                if area > 0 and (ix * iy) >= 0.3 * area:
+                                    return True
                 hw = u.GetWindow(ctypes.c_void_p(hw_i), GW_HWNDNEXT)
             return False
         except Exception:
@@ -856,12 +947,18 @@ class Api:
                 mini = self._hwnd_of(self._window)
                 if not mini:
                     continue
-                if not u.IsWindow(host):
-                    # 호스트가 닫힘 → 모드 해제하고 다시 표시
+                # 호스트가 닫힘(X) 또는 파괴 직전(핸들만 남고 안 보임) →
+                # 모드만 해제하고 미니는 그 자리에 계속 표시
+                host_gone = not u.IsWindow(host)
+                if not host_gone and (not u.IsWindowVisible(host)
+                                      and not u.IsIconic(host)):
+                    host_gone = True
+                if host_gone:
                     self._cham_host = None
+                    self._cham_title = None
                     u.ShowWindow(mini, SW_SHOWNOACTIVATE)
                     self._cham_visible = True
-                    self._toast("호스트 창이 닫혀 카멜레온 모드를 껐어요")
+                    self._toast("호스트 창이 닫혀 카멜레온 모드를 껐어요 (미니는 유지)")
                     continue
 
                 mini_shown = bool(u.IsWindowVisible(mini))
@@ -879,10 +976,11 @@ class Api:
                 # 다른 창이 활성화만 된 경우(호스트가 안 가려짐)엔 계속 떠 있고,
                 # 미니 자리를 실제로 덮는 창이 호스트 위로 오면 같이 숨는다.
                 visible = True
+                cur_title = _norm_title(_win_title(u, host))
                 if u.IsIconic(host):
                     visible = False
-                elif self._cham_title and _norm_title(_win_title(u, host)) != self._cham_title:
-                    visible = False    # 브라우저 탭이 바뀜
+                elif self._cham_title and cur_title and cur_title != self._cham_title:
+                    visible = False    # 브라우저 탭이 바뀜 (빈 제목은 판정 보류)
                 else:
                     region = (expect[0], expect[1],
                               expect[0] + self._window.width,
@@ -1001,6 +1099,8 @@ class Api:
             "onTop": bool(self._config.get("onTop", True)),
             "opacity": int(self._config.get("opacity", 100)),
             "cham": bool(self._cham_host),
+            "still": bool(self._config.get("stillOn", False)),
+            "stillSec": int(self._config.get("stillSec", 10)),
         }
         try:
             r = self._window.evaluate_js(
@@ -1072,6 +1172,15 @@ class Api:
                 self.set_on_top(not self._config.get("onTop", True))
             elif name == "cham":
                 self.toggle_chameleon()
+            elif name == "still":
+                on = not self._config.get("stillOn", False)
+                self._config.update({"stillOn": on})
+                self._persist_later()
+                sec = int(self._config.get("stillSec", 10))
+                self._window.evaluate_js(
+                    "window.__mini && __mini.setStill(%s, %d)"
+                    % ("true" if on else "false", sec)
+                )
             elif name == "scale2":
                 self.set_scale(2)
             elif name == "scale1":
@@ -1189,7 +1298,11 @@ class Api:
 
     def _inject_mini_hook(self, window=None):
         try:
-            self._window.evaluate_js(MINI_HOOK_JS)
+            js = MINI_HOOK_JS.replace("__STILL__", json.dumps({
+                "on": bool(self._config.get("stillOn", False)),
+                "sec": int(self._config.get("stillSec", 10)),
+            }))
+            self._window.evaluate_js(js)
         except Exception:
             pass
 
