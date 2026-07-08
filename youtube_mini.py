@@ -148,7 +148,9 @@ def _norm_title(title):
 
 SW_HIDE, SW_SHOWNOACTIVATE, GA_ROOT = 0, 4, 2
 HWND_TOPMOST = -1
-SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x0001, 0x0010, 0x0040
+SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER = 0x0001, 0x0002, 0x0004
+SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x0010, 0x0040
+MENU_PARK = (-10000, -10000)   # 메뉴 창 '주차' 위치 (화면 밖)
 
 
 def load_config():
@@ -598,7 +600,15 @@ class Api:
         try:
             ox, oy = getattr(self, "_drag_origin", (self._window.x, self._window.y))
             nx, ny = int(ox + dx), int(oy + dy)
-            self._window.move(nx, ny)
+            # UI 스레드(Invoke)를 거치지 않는 SetWindowPos 로 이동 —
+            # UI 스레드가 바빠도/꼬여도 드래그는 항상 동작한다.
+            u = _user32()
+            mh = self._hwnd_of(self._window)
+            if u is not None and mh:
+                u.SetWindowPos(mh, None, nx, ny, 0, 0,
+                               SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+            else:
+                self._window.move(nx, ny)
             self._config.update({"x": nx, "y": ny})
             self._persist_later()
         except Exception:
@@ -614,7 +624,13 @@ class Api:
         """우측 하단 손잡이 드래그로 크기 조절."""
         try:
             w, h = max(MIN_W, int(w)), max(MIN_H, int(h))
-            self._window.resize(w, h)
+            u = _user32()
+            mh = self._hwnd_of(self._window)
+            if u is not None and mh:
+                u.SetWindowPos(mh, None, 0, 0, w, h,
+                               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
+            else:
+                self._window.resize(w, h)
             self._config.update({"width": w, "height": h})
             self._persist_later()
         except Exception:
@@ -766,42 +782,41 @@ class Api:
     # ---- 팝업 메뉴 창 ----
 
     def _ensure_menu(self):
+        """메뉴 창 생성 — 반드시 webview.start 전(main)에 호출할 것.
+
+        실행 중(runtime) 생성은 WebView2 초기화가 꼬여 UI 스레드가 멈추고
+        드래그(창 이동)까지 죽는 사고가 있었다. 시작 전에 '숨김 없이'
+        화면 밖 좌표에 만들어 두면 초기화가 정상 완료되고, 화면 밖이라
+        보이지도 않는다. 이후 표시/숨김은 창을 커서 위치로 가져오거나
+        다시 화면 밖으로 '주차'하는 이동으로만 처리한다.
+        """
         if self._menu is not None and self._menu in webview.windows:
             return
         try:
-            # 정상 크기로 만들되(1x1 등 극소 크기는 WebView2 초기화를 깨뜨려
-            # UI 스레드까지 멈출 수 있음) 화면 밖 좌표에 생성해,
-            # hidden 이 무시되고 잠깐 표시되더라도 눈에 보이지 않게 한다.
-            self._menu = webview.create_window(
-                "menu",
+            kwargs = dict(
                 html=MENU_HTML,
                 js_api=self,
                 width=MENU_W,
                 height=MENU_H,
-                x=-10000,
-                y=-10000,
+                x=MENU_PARK[0],
+                y=MENU_PARK[1],
                 frameless=True,
                 on_top=True,
                 resizable=False,
-                hidden=True,
             )
+            try:
+                self._menu = webview.create_window("menu", focus=False, **kwargs)
+            except TypeError:   # 구버전: focus 파라미터 없음
+                self._menu = webview.create_window("menu", **kwargs)
         except Exception as e:
             self._menu = None
             _log_file("menu create failed: %r" % (e,))
             return
-        # 의도치 않게 표시되면(우클릭으로 연 게 아니면) 즉시 숨긴다.
-        try:
-            self._menu.events.shown += self._on_menu_shown
-        except Exception:
-            pass
-        for delay in (0.3, 1.0):
-            t = threading.Timer(delay, self._on_menu_shown)
+        # 작업표시줄에 'menu' 항목이 생기지 않게 (네이티브 준비 후 적용)
+        for delay in (0.5, 2.0):
+            t = threading.Timer(delay, self._menu_no_taskbar)
             t.daemon = True
             t.start()
-        # 작업표시줄에 'menu' 항목이 생기지 않게 (네이티브 준비 후 적용)
-        t = threading.Timer(1.2, self._menu_no_taskbar)
-        t.daemon = True
-        t.start()
 
     def _menu_no_taskbar(self):
         try:
@@ -813,15 +828,6 @@ class Api:
                 )
         except Exception as e:
             _log_file("menu_no_taskbar failed: %r" % (e,))
-
-    def _on_menu_shown(self, window=None):
-        if self._menu_open:
-            return
-        try:
-            if self._menu is not None and self._menu in webview.windows:
-                self._menu.hide()
-        except Exception:
-            pass
 
     def menu_resize(self, w, h):
         """메뉴 페이지가 측정한 실제 필요 크기(물리 px)로 창 크기 보정."""
@@ -887,10 +893,9 @@ class Api:
                 )
             except Exception:
                 pass
-            # shown 이벤트 가드(_on_menu_shown)가 닫아버리지 않도록 먼저 표시 상태 기록
             self._menu_open = True
-            # 숨김 상태의 창에는 pywebview move 가 적용되지 않는 경우가 있어
-            # SetWindowPos 로 위치+크기+표시+최상위를 한 번에 처리한다.
+            # 창은 항상 '표시' 상태 — 커서 위치로 이동시키는 것만으로 나타난다.
+            # (위치+크기+최상위+표시를 SetWindowPos 한 번으로, 포커스 안 뺏음)
             u = _user32()
             mh = self._hwnd_of(self._menu)
             if u is not None and mh:
@@ -902,7 +907,6 @@ class Api:
                 except Exception:
                     pass
                 self._menu.move(x, y)
-                self._menu.show()
         except Exception as e:
             self._menu_open = False
             _log_file("show_menu failed: %r" % (e,))
@@ -911,14 +915,15 @@ class Api:
         self._menu_open = False
         try:
             if self._menu is not None and self._menu in webview.windows:
-                # SetWindowPos 로 표시한 창은 WinForms 의 표시 상태 캐시와
-                # 어긋날 수 있어 네이티브로 직접 숨긴다.
+                # 숨기는 대신 화면 밖으로 '주차' — 표시 상태를 안 건드려
+                # WinForms/WebView2 상태 꼬임이 없다.
                 u = _user32()
                 mh = self._hwnd_of(self._menu)
                 if u is not None and mh:
-                    u.ShowWindow(mh, SW_HIDE)
+                    u.SetWindowPos(mh, HWND_TOPMOST, MENU_PARK[0], MENU_PARK[1], 0, 0,
+                                   SWP_NOSIZE | SWP_NOACTIVATE)
                 else:
-                    self._menu.hide()
+                    self._menu.move(MENU_PARK[0], MENU_PARK[1])
         except Exception:
             pass
 
@@ -1088,13 +1093,6 @@ def _keep_mini_injected(api):
         api._apply_opacity(int(api._config.get("opacity", 100)))
     except Exception as e:
         _log_file("apply_opacity failed: %r" % (e,))
-    # 팝업 메뉴 창을 미리(숨김) 만들어 첫 우클릭 지연을 없앤다.
-    # 시작 전에 만들면 hidden 이 무시되어 흰 창이 잠깐 보이므로 여기서 생성.
-    time.sleep(0.5)
-    try:
-        api._ensure_menu()
-    except Exception as e:
-        _log_file("ensure_menu at start failed: %r" % (e,))
     while True:
         try:
             api._inject_mini_hook()
@@ -1133,6 +1131,9 @@ def main():
         easy_drag=False,
     )
     api._window = window
+    # 팝업 메뉴 창은 반드시 시작 전에 생성 (화면 밖 좌표라 보이지 않음).
+    # 실행 중 생성은 WebView2 초기화가 꼬여 드래그까지 죽는 사고가 있었다.
+    api._ensure_menu()
     # 시청 페이지가 로드될 때마다 미니 UI(CSS/실드/손잡이) 주입
     try:
         window.events.loaded += api._inject_mini_hook
