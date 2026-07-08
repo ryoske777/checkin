@@ -47,6 +47,7 @@ import ctypes
 import json
 import os
 import re
+import sys
 import threading
 import time
 from ctypes import wintypes
@@ -641,6 +642,7 @@ class Api:
         self._browser = None
         self._menu = None
         self._menu_open = False
+        self._engine_ok = False   # loaded 이벤트 수신 = WebView2 정상
         self._menu_w, self._menu_h = MENU_W, MENU_H
         self._config = config if isinstance(config, dict) else {}
         self._save_timer = None
@@ -1296,6 +1298,14 @@ class Api:
         except Exception:
             pass
 
+    def _on_engine_loaded(self, window=None):
+        """미니 창 loaded 이벤트: WebView2 정상 표시 + UI 주입."""
+        self._engine_ok = True
+        if self._config.get("udfResetCount"):
+            self._config.update({"udfResetCount": 0})
+            self._persist_later()
+        self._inject_mini_hook()
+
     def _inject_mini_hook(self, window=None):
         try:
             js = MINI_HOOK_JS.replace("__STILL__", json.dumps({
@@ -1417,6 +1427,64 @@ def _hide_own_console():
         pass
 
 
+def _relaunch():
+    """뮤텍스를 풀고 자기 자신을 새 프로세스로 재실행."""
+    global _MUTEX
+    try:
+        if _MUTEX:
+            ctypes.windll.kernel32.CloseHandle(_MUTEX)
+            _MUTEX = None
+    except Exception:
+        pass
+    import subprocess
+    try:
+        if getattr(sys, "frozen", False):
+            subprocess.Popen([sys.executable])
+        else:
+            subprocess.Popen([sys.executable, os.path.abspath(__file__)])
+    except Exception:
+        pass
+    os._exit(0)
+
+
+def _engine_watchdog(api):
+    """WebView2 초기화 실패(0x8007139F 등 → loaded 이벤트가 영영 안 옴)를
+    감지해 엔진 프로필(EBWebView)을 초기화하고 자동 재시작한다."""
+    time.sleep(20)
+    if api._engine_ok:
+        return
+    _log_file("engine watchdog: no loaded event in 20s (WebView2 init failure)")
+    try:
+        u = ctypes.windll.user32
+    except AttributeError:
+        return
+    count = int(api._config.get("udfResetCount", 0))
+    if count >= 2:
+        try:
+            u.MessageBoxW(
+                None,
+                "영상 엔진(WebView2) 초기화가 반복 실패했습니다.\n"
+                "작업 관리자에서 msedgewebview2.exe 를 모두 종료하거나\n"
+                "PC 를 재부팅한 뒤 다시 실행해 주세요.",
+                "YT Mini", 0x30,
+            )
+        except Exception:
+            pass
+        return
+    api._config.update({"resetUdf": True, "udfResetCount": count + 1})
+    save_config(api._config)
+    try:
+        u.MessageBoxW(
+            None,
+            "영상 엔진(WebView2) 초기화에 실패해 프로필을 복구하고 "
+            "다시 시작합니다.\n(유튜브 로그인은 다시 필요할 수 있어요)",
+            "YT Mini", 0x40,
+        )
+    except Exception:
+        pass
+    _relaunch()
+
+
 def _keep_topmost(api):
     """'항상 위'가 켜져 있는 동안 최상위 z순서를 주기적으로 재단언.
 
@@ -1455,6 +1523,8 @@ def _keep_mini_injected(api):
     """
     t = threading.Thread(target=_keep_topmost, args=(api,), daemon=True)
     t.start()
+    t2 = threading.Thread(target=_engine_watchdog, args=(api,), daemon=True)
+    t2.start()
     # 시작 시 저장된 불투명도 적용
     try:
         api._apply_opacity(int(api._config.get("opacity", 100)))
@@ -1502,6 +1572,14 @@ def main():
     )
 
     cfg = load_config()
+    # 지난 실행에서 엔진 초기화 실패로 프로필 복구가 예약된 경우:
+    # 이전 프로세스(웹뷰 포함)가 완전히 내려간 뒤 엔진 데이터만 삭제
+    if cfg.pop("resetUdf", False):
+        time.sleep(1.5)
+        import shutil
+        shutil.rmtree(os.path.join(PROFILE_DIR, "EBWebView"), ignore_errors=True)
+        save_config(cfg)
+        _log_file("EBWebView profile reset done")
     start_url = cfg.get("lastUrl") or DEFAULT_URL
 
     api = Api(cfg)
@@ -1526,10 +1604,11 @@ def main():
     # 실행 중 생성은 WebView2 초기화가 꼬여 드래그까지 죽는 사고가 있었다.
     api._ensure_menu()
     # 시청 페이지가 로드될 때마다 미니 UI(CSS/실드/손잡이) 주입
+    # (+ loaded 수신 = WebView2 정상이라는 신호로 워치독에 사용)
     try:
-        window.events.loaded += api._inject_mini_hook
+        window.events.loaded += api._on_engine_loaded
     except AttributeError:
-        window.loaded += api._inject_mini_hook
+        window.loaded += api._on_engine_loaded
     # 창 크기/위치 변경을 저장 (구버전 pywebview 는 moved 이벤트가 없을 수 있음)
     for event_name in ("resized", "moved"):
         try:
