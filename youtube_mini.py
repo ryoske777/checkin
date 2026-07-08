@@ -655,7 +655,14 @@ class Api:
 
     def _hwnd_of(self, w):
         try:
-            handle = w.native.Handle
+            native = w.native
+            # 주의: Handle 을 읽는 순간 핸들이 없으면 '현재 스레드에서'
+            # 생성돼 버린다(WinForms). 백그라운드 스레드에서 그러면 창이
+            # 잘못된 스레드에 묶여 아예 표시되지 않으므로, 이미 만들어진
+            # 경우에만 읽는다.
+            if native is None or not getattr(native, "IsHandleCreated", True):
+                return None
+            handle = native.Handle
             try:
                 return int(handle.ToInt64())
             except Exception:
@@ -1119,6 +1126,7 @@ def _keep_topmost(api):
     u = _user32()
     if u is None:
         return
+    time.sleep(3)   # 창 핸들이 메인 스레드에서 만들어질 때까지 대기
     while True:
         time.sleep(0.7)
         try:
