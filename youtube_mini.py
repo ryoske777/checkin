@@ -367,6 +367,12 @@ MINI_HOOK_JS = r"""
     v.muted = !v.muted;
     toast(v.muted ? '음소거' : '소리 켜짐');
   }
+  function setVolume(p){
+    var v = vid(); if (!v) return;
+    p = Math.max(0, Math.min(100, p | 0));
+    v.volume = p / 100;
+    if (p > 0 && v.muted) v.muted = false;   // 볼륨을 올리면 음소거 해제
+  }
   function nextVideo(){ var b = document.querySelector('.ytp-next-button'); if (b) b.click(); }
   function prevVideo(){ history.back(); }
 
@@ -418,7 +424,7 @@ MINI_HOOK_JS = r"""
 
   // 파이썬(팝업 메뉴 창)에서 호출할 수 있게 노출
   window.__mini = {
-    togglePlay: togglePlay, toggleMute: toggleMute,
+    togglePlay: togglePlay, toggleMute: toggleMute, setVolume: setVolume,
     nextVideo: nextVideo, prevVideo: prevVideo,
     openUrl: openUrl, toast: toast, setStill: setStill
   };
@@ -553,8 +559,8 @@ MENU_HTML = r"""<!DOCTYPE html>
   #g { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 5px; }
   .mi { padding: 6px 9px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
   .mi:hover { background: #ff5252; }
-  #op, #sop { grid-column: 1 / span 2; padding: 4px 9px 6px; }
-  #op label, #sop label { font-size: 11px; opacity: 0.8; display: block; margin-bottom: 2px; }
+  #op, #sop, #vop { grid-column: 1 / span 2; padding: 4px 9px 6px; }
+  #op label, #sop label, #vop label { font-size: 11px; opacity: 0.8; display: block; margin-bottom: 2px; }
   input[type=range] { width: 100%; }
 </style>
 </head>
@@ -563,7 +569,7 @@ MENU_HTML = r"""<!DOCTYPE html>
 <script>
   var api = function(){ return (window.pywebview && window.pywebview.api) || null; };
   var st = { playing: false, muted: false, onTop: true, opacity: 100,
-             cham: false, still: false, stillSec: 10 };
+             cham: false, still: false, stillSec: 10, volume: 100 };
   var items = [
     ['play',       function(){ return st.playing ? '⏸ 일시정지' : '▶ 재생'; }],
     ['mute',       function(){ return st.muted ? '소리 켜기' : '음소거'; }],
@@ -589,6 +595,16 @@ MENU_HTML = r"""<!DOCTYPE html>
     d.onclick = function(){ var a = api(); if (a) a.menu_action(it[0]); };
     g.appendChild(d);
   });
+  var vop = document.createElement('div'); vop.id = 'vop';
+  var vlb = document.createElement('label');
+  var vrg = document.createElement('input');
+  vrg.type = 'range'; vrg.min = 0; vrg.max = 100; vrg.value = 100;
+  vrg.addEventListener('input', function(){
+    vlb.textContent = '볼륨 ' + vrg.value + '%';
+    var a = api(); if (a) a.set_volume(parseInt(vrg.value, 10));
+  });
+  vop.appendChild(vlb); vop.appendChild(vrg); g.appendChild(vop);
+
   var op = document.createElement('div'); op.id = 'op';
   var lb = document.createElement('label');
   var rg = document.createElement('input');
@@ -617,6 +633,8 @@ MENU_HTML = r"""<!DOCTYPE html>
     lb.textContent = '불투명도 ' + st.opacity + '%';
     srg.value = st.stillSec;
     slb.textContent = '스틸컷 간격 ' + st.stillSec + '초';
+    vrg.value = st.volume;
+    vlb.textContent = '볼륨 ' + st.volume + '%';
   }
   function setState(s){ st = Object.assign(st, s || {}); refresh(); }
   window.setState = setState;
@@ -727,6 +745,19 @@ class Api:
             return
         try:
             self._window.on_top = flag
+        except Exception:
+            pass
+
+    def set_volume(self, pct):
+        """볼륨 슬라이더 (0~100%). 볼륨을 올리면 음소거도 해제."""
+        try:
+            pct = max(0, min(100, int(pct)))
+        except Exception:
+            return
+        try:
+            self._window.evaluate_js(
+                "window.__mini && __mini.setVolume(%d)" % pct
+            )
         except Exception:
             pass
 
@@ -1128,10 +1159,13 @@ class Api:
         try:
             r = self._window.evaluate_js(
                 "(function(){var v=document.querySelector('video');"
-                "return v ? ((v.paused?'0':'1')+(v.muted?'1':'0')) : '00';})()"
+                "return v ? ((v.paused?'0':'1')+(v.muted?'1':'0')"
+                "+Math.round((v.volume||0)*100)) : '';})()"
             )
             state["playing"] = bool(r and r[0] == "1")
             state["muted"] = bool(r and len(r) > 1 and r[1] == "1")
+            if r and len(r) > 2:
+                state["volume"] = max(0, min(100, int(r[2:])))
         except Exception:
             pass
         try:
