@@ -112,6 +112,26 @@ class _MONITORINFO(ctypes.Structure):
 MONITOR_DEFAULTTONEAREST = 2
 
 
+def _strip_window_chrome(hwnd):
+    """Windows(특히 11)가 프레임리스 창에 기본으로 붙이는
+    DWM 그림자와 둥근 모서리를 제거한다."""
+    try:
+        dwm = ctypes.windll.dwmapi
+    except AttributeError:
+        return
+    try:
+        # DWMWA_NCRENDERING_POLICY(2) = DWMNCRP_DISABLED(1): 그림자 제거
+        val = ctypes.c_int(1)
+        dwm.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), 2,
+                                  ctypes.byref(val), ctypes.sizeof(val))
+        # DWMWA_WINDOW_CORNER_PREFERENCE(33) = DWMWCP_DONOTROUND(1)
+        val2 = ctypes.c_int(1)
+        dwm.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), 33,
+                                  ctypes.byref(val2), ctypes.sizeof(val2))
+    except Exception:
+        pass
+
+
 def _work_area_at(x, y):
     """(x, y)가 속한 모니터의 작업영역 (물리 px). 실패 시 None."""
     u = _user32()
@@ -223,7 +243,8 @@ MINI_HOOK_JS = r"""
   var st = document.createElement('style');
   st.textContent = [
     'ytd-masthead, #masthead-container, #secondary, #below, #comments,',
-    '#guide, tp-yt-app-drawer, ytd-mini-guide-renderer { display:none !important; }',
+    '#guide, tp-yt-app-drawer, ytd-mini-guide-renderer,',
+    '#cinematics, #cinematics-container { display:none !important; }',  // 앰비언트 모드 빛번짐 제거
     'body { overflow:hidden !important; }',
     '#page-manager { margin:0 !important; }',
     '#movie_player { position:fixed !important; left:0 !important; top:0 !important;',
@@ -1127,15 +1148,22 @@ def _keep_topmost(api):
     if u is None:
         return
     time.sleep(3)   # 창 핸들이 메인 스레드에서 만들어질 때까지 대기
+    flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
     while True:
         time.sleep(0.7)
         try:
             if not api._config.get("onTop", True):
                 continue
+            if api._menu_open:      # 메뉴가 미니 위에 떠 있을 때 가리지 않게
+                continue
             mh = api._hwnd_of(api._window)
             if mh and u.IsWindowVisible(mh):
-                u.SetWindowPos(mh, HWND_TOPMOST, 0, 0, 0, 0,
-                               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+                # 1) 최상위 밴드 소속 보장  2) 밴드 '안'에서도 맨 위로.
+                # 이미 최상위인 창에 HWND_TOPMOST 만 다시 줘서는 밴드 내
+                # 순서가 안 바뀌어 작업표시줄(역시 최상위) 아래로 밀린
+                # 상태가 유지된다 — HWND_TOP(0) 호출이 실제로 끌어올린다.
+                u.SetWindowPos(mh, HWND_TOPMOST, 0, 0, 0, 0, flags)
+                u.SetWindowPos(mh, None, 0, 0, 0, 0, flags)   # HWND_TOP
         except Exception:
             pass
 
@@ -1153,11 +1181,21 @@ def _keep_mini_injected(api):
         api._apply_opacity(int(api._config.get("opacity", 100)))
     except Exception as e:
         _log_file("apply_opacity failed: %r" % (e,))
+    chrome_stripped = False
     while True:
         try:
             api._inject_mini_hook()
         except Exception:
             pass
+        # 창 핸들이 준비되면 한 번만: DWM 그림자/둥근 모서리 제거
+        if not chrome_stripped:
+            try:
+                mh = api._hwnd_of(api._window)
+                if mh:
+                    _strip_window_chrome(mh)
+                    chrome_stripped = True
+            except Exception:
+                chrome_stripped = True
         # 마지막 시청 영상 저장 (파이썬 주도라 내비게이션 중 예외도 조용히 처리)
         try:
             url = api._window.get_current_url()
