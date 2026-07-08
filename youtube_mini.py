@@ -43,6 +43,7 @@ from ctypes import wintypes
 import webview
 
 BASE_W, BASE_H = 194, 110
+MIN_W, MIN_H = 60, 20      # 크기 조절 하한 — 극한까지 줄일 수 있게
 MENU_W, MENU_H = 240, 252
 # 라이브 스트림은 종료되면 '실시간 스트림 녹화를 볼 수 없습니다' 오류가
 # 나므로 기본 시작 영상은 항상 재생 가능한 일반 영상으로 둔다.
@@ -596,7 +597,7 @@ class Api:
     def resize_to(self, w, h):
         """우측 하단 손잡이 드래그로 크기 조절."""
         try:
-            w, h = max(100, int(w)), max(60, int(h))
+            w, h = max(MIN_W, int(w)), max(MIN_H, int(h))
             self._window.resize(w, h)
             self._config.update({"width": w, "height": h})
             self._persist_later()
@@ -1024,7 +1025,7 @@ def main():
         y=cfg.get("y"),
         on_top=bool(cfg.get("onTop", True)),
         resizable=True,
-        min_size=(100, 60),
+        min_size=(MIN_W, MIN_H),
         frameless=True,
         # 창 이동은 주입한 실드가 begin_move/move_delta 로 직접 처리
         # (유튜브 플레이어가 이벤트를 삼켜 easy_drag 는 동작하지 않음)
