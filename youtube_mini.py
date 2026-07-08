@@ -380,9 +380,9 @@ MINI_HOOK_JS = r"""
       toast('재생 불가 영상 — 우클릭 메뉴에서 URL/홈으로 이동');
     }
 
-    if (location.href.indexOf('/watch') >= 0){
-      var a = api(); if (a) a.save_ui_state({lastUrl: location.href});
-    }
+    // (마지막 영상 저장은 파이썬 쪽에서 get_current_url 로 처리 —
+    //  내비게이션 도중 JS→파이썬 호출의 반환 콜백이 사라지며
+    //  pywebview 내부 스레드가 예외를 뱉는 문제를 피한다)
     window.dispatchEvent(new Event('resize'));   // 플레이어 크기 갱신
   }, 2000);
  } catch (err) {
@@ -962,24 +962,66 @@ class Api:
     # ---- 홈/구독 브라우저 창 ----
 
     def _browser_geometry(self, bw=1000, bh=650):
-        """미니 창 바로 아래(공간 없으면 위)에 붙는 위치 계산."""
+        """미니 창 바로 아래(공간 없으면 위)에 붙는 위치 계산.
+
+        화면 경계는 미니 창이 있는 모니터의 실제 작업영역(물리 px) 기준 —
+        pywebview 의 논리 화면 크기와 물리 좌표를 섞으면 DPI 배율에서
+        보정이 어긋난다.
+        """
         try:
             mx, my = self._window.x, self._window.y
             mh = self._window.height
             x, y = mx, my + mh + 6
-            try:
-                s = webview.screens[0]
-                sw, sh = s.width, s.height
-                x = max(0, min(x, sw - bw))
-                if y + bh > sh:
+            area = _work_area_at(mx + 10, my + 10)
+            if area:
+                left, top, right, bottom = area
+                x = max(left, min(x, right - bw))
+                if y + bh > bottom:
                     y = my - bh - 6          # 아래 공간이 없으면 위로
-                if y < 0:
-                    y = max(0, sh - bh)
-            except Exception:
-                pass
+                if y < top:
+                    y = max(top, bottom - bh)
             return int(x), int(y)
         except Exception:
             return None, None
+
+    def _place_browser(self, x, y, bw, bh):
+        """브라우저 창을 미니 옆 계산 위치로 이동.
+
+        pywebview move/생성 좌표는 런타임 창에 적용되지 않는 경우가 있어
+        SetWindowPos 를 쓰고, 창 핸들이 준비될 때까지 재시도한다.
+        """
+        if x is None:
+            return
+        browser = self._browser
+
+        def _worker():
+            placed = 0
+            for _ in range(20):          # 최대 ~5초
+                try:
+                    if browser is None or browser not in webview.windows:
+                        return
+                    u = _user32()
+                    hw = self._hwnd_of(browser)
+                    if u is not None and hw:
+                        u.SetWindowPos(hw, None, int(x), int(y), int(bw), int(bh),
+                                       SWP_NOZORDER)
+                        placed += 1
+                        # 초기화 과정에서 창이 스스로 위치를 되돌리는 경우가
+                        # 있어 성공 후 한 번 더 못박는다.
+                        if placed >= 2:
+                            return
+                except Exception as e:
+                    _log_file("place_browser: %r" % (e,))
+                    return
+                time.sleep(0.3)
+            # Windows API 를 못 쓰는 환경 폴백
+            try:
+                browser.move(int(x), int(y))
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
 
     def open_browser(self, which):
         """YT 홈/구독을 보는 일반 브라우저 창. 이미 열려 있으면 재사용."""
@@ -989,10 +1031,9 @@ class Api:
         if self._browser is not None and self._browser in webview.windows:
             try:
                 self._browser.load_url(url)
-                if x is not None:
-                    self._browser.move(x, y)
                 self._browser.restore()
                 self._browser.show()
+                self._place_browser(x, y, bw, bh)
                 return
             except Exception:
                 pass
@@ -1011,20 +1052,7 @@ class Api:
             self._browser.events.loaded += self._inject_browser_hook
         except AttributeError:
             self._browser.loaded += self._inject_browser_hook
-        # 생성 시 지정한 좌표가 무시되는 경우가 있어 잠시 후 한 번 더 이동
-        if x is not None:
-            browser = self._browser
-
-            def _reposition():
-                try:
-                    if browser in webview.windows:
-                        browser.move(x, y)
-                except Exception:
-                    pass
-
-            t = threading.Timer(0.8, _reposition)
-            t.daemon = True
-            t.start()
+        self._place_browser(x, y, bw, bh)
 
     def _inject_browser_hook(self, window=None):
         try:
@@ -1082,12 +1110,36 @@ def _hide_own_console():
         pass
 
 
+def _keep_topmost(api):
+    """'항상 위'가 켜져 있는 동안 최상위 z순서를 주기적으로 재단언.
+
+    작업표시줄도 최상위 창이라 클릭하면 그 위로 올라오는데, 재단언으로
+    미니 창이 작업표시줄까지 덮은 상태를 유지한다.
+    """
+    u = _user32()
+    if u is None:
+        return
+    while True:
+        time.sleep(0.7)
+        try:
+            if not api._config.get("onTop", True):
+                continue
+            mh = api._hwnd_of(api._window)
+            if mh and u.IsWindowVisible(mh):
+                u.SetWindowPos(mh, HWND_TOPMOST, 0, 0, 0, 0,
+                               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        except Exception:
+            pass
+
+
 def _keep_mini_injected(api):
     """미니 UI 주입 자가치유 루프.
 
     loaded 이벤트를 놓치거나 주입 스크립트가 실패해도 2초마다 재시도한다.
     스크립트 자체가 __miniHooked 가드로 멱등이라 중복 주입은 무해하다.
     """
+    t = threading.Thread(target=_keep_topmost, args=(api,), daemon=True)
+    t.start()
     # 시작 시 저장된 불투명도 적용
     try:
         api._apply_opacity(int(api._config.get("opacity", 100)))
@@ -1096,6 +1148,14 @@ def _keep_mini_injected(api):
     while True:
         try:
             api._inject_mini_hook()
+        except Exception:
+            pass
+        # 마지막 시청 영상 저장 (파이썬 주도라 내비게이션 중 예외도 조용히 처리)
+        try:
+            url = api._window.get_current_url()
+            if url and "/watch" in url and url != api._config.get("lastUrl"):
+                api._config.update({"lastUrl": url})
+                api._persist_later()
         except Exception:
             pass
         time.sleep(2)
