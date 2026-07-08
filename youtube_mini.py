@@ -242,17 +242,23 @@ def load_config():
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        _log_file("load_config failed (설정 초기화됨): %r" % (e,))
         return {}
 
 
 def save_config(cfg):
+    # 임시 파일에 쓰고 교체(원자적) — 저장 도중 종료돼도 설정이 깨지지 않음
     try:
         os.makedirs(PROFILE_DIR, exist_ok=True)
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+        os.replace(tmp, CONFIG_PATH)
+    except Exception as e:
+        _log_file("save_config failed: %r" % (e,))
 
 
 def _log_file(msg):
@@ -862,6 +868,14 @@ class Api:
         self._window.minimize()
 
     def quit(self):
+        # 종료 직전 최종 크기/위치까지 즉시 저장 (디바운스 타이머 미대기)
+        try:
+            if self._save_timer is not None:
+                self._save_timer.cancel()
+            self.on_geometry_change()
+            save_config(self._config)
+        except Exception:
+            pass
         for w in (self._menu, self._browser):
             try:
                 if w is not None and w in webview.windows:
@@ -1482,29 +1496,54 @@ def _single_instance():
         _MUTEX = k.CreateMutexW(None, False, "YTMini_SingleInstance")
         if k.GetLastError() != 183:      # ERROR_ALREADY_EXISTS
             return True
-        # 이미 실행 중 → 기존 창(숨어 있어도)을 표시하고 앞으로
+        # 이미 실행 중 → 종료 후 새로 시작할지 물어본다
         try:
             u = _user32()
-            hwnd = u.FindWindowW(None, "YT Mini") if u else None
-            if u and hwnd:
-                u.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
-                u.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-                               | SWP_SHOWWINDOW)
-            elif u:
-                # 창 없는 좀비 프로세스 — 사용자가 직접 정리해야 함
-                u.MessageBoxW(
-                    None,
-                    "YT Mini 가 이미 실행 중이지만 창을 찾을 수 없습니다.\n"
-                    "작업 관리자에서 YTMini.exe / python 프로세스를 종료한 뒤 "
-                    "다시 실행해 주세요.",
-                    "YT Mini",
-                    0x40,  # MB_ICONINFORMATION
-                )
-        except Exception:
-            pass
-        _log_file("already running - second instance exited")
-        return False
+            if u is None:
+                return False
+            hwnd = u.FindWindowW(None, "YT Mini")
+            res = u.MessageBoxW(
+                None,
+                "YT Mini 가 이미 실행 중입니다.\n"
+                "기존 실행을 종료하고 새로 시작할까요?",
+                "YT Mini",
+                0x24 | 0x40000,   # MB_YESNO | MB_ICONQUESTION | MB_TOPMOST
+            )
+            if res != 6:          # IDYES(6) 아님 → 기존 창만 앞으로 가져오고 종료
+                if hwnd:
+                    u.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+                    u.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                                   | SWP_SHOWWINDOW)
+                _log_file("already running - user kept old instance")
+                return False
+            # 예 → 기존 프로세스 종료 후 계속 실행
+            killed = False
+            if hwnd:
+                pid = wintypes.DWORD(0)
+                u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value and pid.value != os.getpid():
+                    kk = ctypes.WinDLL("kernel32")
+                    kk.OpenProcess.restype = ctypes.c_void_p
+                    ph = kk.OpenProcess(0x0001, False, pid.value)  # PROCESS_TERMINATE
+                    if ph:
+                        kk.TerminateProcess(ph, 0)
+                        kk.CloseHandle(ph)
+                        killed = True
+            if not killed and getattr(sys, "frozen", False):
+                # 창 없는 좀비 exe 정리 (자기 자신 제외)
+                import subprocess
+                subprocess.run(
+                    ["taskkill", "/F", "/FI", "IMAGENAME eq YTMini.exe",
+                     "/FI", "PID ne %d" % os.getpid()],
+                    creationflags=0x08000000, check=False)  # CREATE_NO_WINDOW
+                killed = True
+            _log_file("already running - killed old instance: %s" % killed)
+            time.sleep(1.2)   # WebView2 자식 프로세스/프로필 잠금 정리 대기
+            return True
+        except Exception as e:
+            _log_file("single_instance takeover failed: %r" % (e,))
+            return False
     except Exception:
         return True
 
@@ -1673,11 +1712,35 @@ def _keep_mini_injected(api):
                     chrome_stripped = True
             except Exception:
                 chrome_stripped = True
-        # 마지막 시청 영상 저장 (파이썬 주도라 내비게이션 중 예외도 조용히 처리)
+        # 마지막 시청 영상 + 재생 위치 저장 (파이썬 주도라 예외도 조용히 처리)
         try:
             url = api._window.get_current_url()
-            if url and "/watch" in url and url != api._config.get("lastUrl"):
-                api._config.update({"lastUrl": url})
+            if url and "/watch" in url:
+                clean = re.sub(r"[&?]t=\d+s?", "", url)
+                changed = False
+                if clean != api._config.get("lastUrl"):
+                    api._config.update({"lastUrl": clean, "lastTime": 0})
+                    changed = True
+                t = api._window.evaluate_js(
+                    "(function(){var v=document.querySelector('video');"
+                    "return v ? Math.floor(v.currentTime||0) : -1;})()"
+                )
+                if (isinstance(t, (int, float)) and t >= 0
+                        and abs(int(t) - int(api._config.get("lastTime", 0) or 0)) >= 5):
+                    api._config.update({"lastTime": int(t)})
+                    changed = True
+                if changed:
+                    api._persist_later()
+        except Exception:
+            pass
+        # 크기/위치 폴링 저장 — moved/resized 이벤트가 없는 환경이나
+        # 네이티브 드래그(OS 가 직접 이동)에서도 확실히 저장되게 한다
+        try:
+            w = api._window
+            geo = {"width": int(w.width), "height": int(w.height),
+                   "x": int(w.x), "y": int(w.y)}
+            if any(api._config.get(k) != v for k, v in geo.items()):
+                api._config.update(geo)
                 api._persist_later()
         except Exception:
             pass
@@ -1722,6 +1785,10 @@ def main():
         save_config(cfg)
         _log_file("EBWebView profile reset done")
     start_url = cfg.get("lastUrl") or DEFAULT_URL
+    # 마지막 재생 위치에서 이어보기 (2초 여유를 두고 되감기)
+    last_t = int(cfg.get("lastTime", 0) or 0)
+    if cfg.get("lastUrl") and last_t > 5 and "t=" not in start_url:
+        start_url += ("&" if "?" in start_url else "?") + "t=%ds" % max(0, last_t - 2)
 
     api = Api(cfg)
     window = webview.create_window(
