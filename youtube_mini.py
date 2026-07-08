@@ -46,7 +46,9 @@ from ctypes import wintypes
 import webview
 
 BASE_W, BASE_H = 194, 110
-MIN_W, MIN_H = 60, 20      # 크기 조절 하한 — 극한까지 줄일 수 있게
+# 크기 조절 하한 — 가로/세로 모두 극한까지. 우측 하단 손잡이(16px)를
+# 다시 잡아 되돌릴 수 있는 최소한의 크기만 남긴다.
+MIN_W, MIN_H = 24, 20
 MENU_W, MENU_H = 240, 252
 # 라이브 스트림은 종료되면 '실시간 스트림 녹화를 볼 수 없습니다' 오류가
 # 나므로 기본 시작 영상은 항상 재생 가능한 일반 영상으로 둔다.
@@ -162,6 +164,16 @@ def save_config(cfg):
         os.makedirs(PROFILE_DIR, exist_ok=True)
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _log_file(msg):
+    """콘솔이 숨겨져 있어도 확인할 수 있는 진단 로그 (~/.yt_mini_profile/mini.log)."""
+    try:
+        os.makedirs(PROFILE_DIR, exist_ok=True)
+        with open(os.path.join(PROFILE_DIR, "mini.log"), "a", encoding="utf-8") as f:
+            f.write(time.strftime("%H:%M:%S") + " " + str(msg) + "\n")
     except Exception:
         pass
 
@@ -517,8 +529,9 @@ class Api:
             self._persist_later()
 
     def log(self, msg):
-        """주입 스크립트의 오류를 콘솔에서 확인할 수 있게 출력."""
+        """주입 스크립트의 오류를 콘솔·로그 파일에서 확인할 수 있게 출력."""
         print("[mini]", msg)
+        _log_file(msg)
 
     def on_geometry_change(self, *args):
         """창 크기/위치 변경 시 저장 (resized/moved 이벤트)."""
@@ -755,22 +768,27 @@ class Api:
     def _ensure_menu(self):
         if self._menu is not None and self._menu in webview.windows:
             return
-        # 1x1 크기 + 화면 밖 좌표로 생성 — hidden 이 무시되고 잠깐
-        # 표시되더라도 눈에 보일 수 없다. 실제 크기/위치는 열 때 지정.
-        self._menu = webview.create_window(
-            "menu",
-            html=MENU_HTML,
-            js_api=self,
-            width=1,
-            height=1,
-            x=-10000,
-            y=-10000,
-            frameless=True,
-            on_top=True,
-            resizable=False,
-            hidden=True,
-        )
-        # hidden=True 가 무시되고 잠깐 표시되는 경우가 있어,
+        try:
+            # 정상 크기로 만들되(1x1 등 극소 크기는 WebView2 초기화를 깨뜨려
+            # UI 스레드까지 멈출 수 있음) 화면 밖 좌표에 생성해,
+            # hidden 이 무시되고 잠깐 표시되더라도 눈에 보이지 않게 한다.
+            self._menu = webview.create_window(
+                "menu",
+                html=MENU_HTML,
+                js_api=self,
+                width=MENU_W,
+                height=MENU_H,
+                x=-10000,
+                y=-10000,
+                frameless=True,
+                on_top=True,
+                resizable=False,
+                hidden=True,
+            )
+        except Exception as e:
+            self._menu = None
+            _log_file("menu create failed: %r" % (e,))
+            return
         # 의도치 않게 표시되면(우클릭으로 연 게 아니면) 즉시 숨긴다.
         try:
             self._menu.events.shown += self._on_menu_shown
@@ -825,7 +843,13 @@ class Api:
         if self._menu_open:
             self.hide_menu()
             return
-        self._ensure_menu()
+        try:
+            self._ensure_menu()
+        except Exception as e:
+            _log_file("ensure_menu failed: %r" % (e,))
+        if self._menu is None or self._menu not in webview.windows:
+            _log_file("show_menu: menu window unavailable")
+            return
         state = {
             "onTop": bool(self._config.get("onTop", True)),
             "opacity": int(self._config.get("opacity", 100)),
@@ -1030,13 +1054,22 @@ def _keep_mini_injected(api):
     스크립트 자체가 __miniHooked 가드로 멱등이라 중복 주입은 무해하다.
     """
     # 시작 시 저장된 불투명도 적용
-    api._apply_opacity(int(api._config.get("opacity", 100)))
+    try:
+        api._apply_opacity(int(api._config.get("opacity", 100)))
+    except Exception as e:
+        _log_file("apply_opacity failed: %r" % (e,))
     # 팝업 메뉴 창을 미리(숨김) 만들어 첫 우클릭 지연을 없앤다.
     # 시작 전에 만들면 hidden 이 무시되어 흰 창이 잠깐 보이므로 여기서 생성.
     time.sleep(0.5)
-    api._ensure_menu()
+    try:
+        api._ensure_menu()
+    except Exception as e:
+        _log_file("ensure_menu at start failed: %r" % (e,))
     while True:
-        api._inject_mini_hook()
+        try:
+            api._inject_mini_hook()
+        except Exception:
+            pass
         time.sleep(2)
 
 
