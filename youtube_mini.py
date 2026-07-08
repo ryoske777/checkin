@@ -962,24 +962,66 @@ class Api:
     # ---- 홈/구독 브라우저 창 ----
 
     def _browser_geometry(self, bw=1000, bh=650):
-        """미니 창 바로 아래(공간 없으면 위)에 붙는 위치 계산."""
+        """미니 창 바로 아래(공간 없으면 위)에 붙는 위치 계산.
+
+        화면 경계는 미니 창이 있는 모니터의 실제 작업영역(물리 px) 기준 —
+        pywebview 의 논리 화면 크기와 물리 좌표를 섞으면 DPI 배율에서
+        보정이 어긋난다.
+        """
         try:
             mx, my = self._window.x, self._window.y
             mh = self._window.height
             x, y = mx, my + mh + 6
-            try:
-                s = webview.screens[0]
-                sw, sh = s.width, s.height
-                x = max(0, min(x, sw - bw))
-                if y + bh > sh:
+            area = _work_area_at(mx + 10, my + 10)
+            if area:
+                left, top, right, bottom = area
+                x = max(left, min(x, right - bw))
+                if y + bh > bottom:
                     y = my - bh - 6          # 아래 공간이 없으면 위로
-                if y < 0:
-                    y = max(0, sh - bh)
-            except Exception:
-                pass
+                if y < top:
+                    y = max(top, bottom - bh)
             return int(x), int(y)
         except Exception:
             return None, None
+
+    def _place_browser(self, x, y, bw, bh):
+        """브라우저 창을 미니 옆 계산 위치로 이동.
+
+        pywebview move/생성 좌표는 런타임 창에 적용되지 않는 경우가 있어
+        SetWindowPos 를 쓰고, 창 핸들이 준비될 때까지 재시도한다.
+        """
+        if x is None:
+            return
+        browser = self._browser
+
+        def _worker():
+            placed = 0
+            for _ in range(20):          # 최대 ~5초
+                try:
+                    if browser is None or browser not in webview.windows:
+                        return
+                    u = _user32()
+                    hw = self._hwnd_of(browser)
+                    if u is not None and hw:
+                        u.SetWindowPos(hw, None, int(x), int(y), int(bw), int(bh),
+                                       SWP_NOZORDER)
+                        placed += 1
+                        # 초기화 과정에서 창이 스스로 위치를 되돌리는 경우가
+                        # 있어 성공 후 한 번 더 못박는다.
+                        if placed >= 2:
+                            return
+                except Exception as e:
+                    _log_file("place_browser: %r" % (e,))
+                    return
+                time.sleep(0.3)
+            # Windows API 를 못 쓰는 환경 폴백
+            try:
+                browser.move(int(x), int(y))
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
 
     def open_browser(self, which):
         """YT 홈/구독을 보는 일반 브라우저 창. 이미 열려 있으면 재사용."""
@@ -989,10 +1031,9 @@ class Api:
         if self._browser is not None and self._browser in webview.windows:
             try:
                 self._browser.load_url(url)
-                if x is not None:
-                    self._browser.move(x, y)
                 self._browser.restore()
                 self._browser.show()
+                self._place_browser(x, y, bw, bh)
                 return
             except Exception:
                 pass
@@ -1011,20 +1052,7 @@ class Api:
             self._browser.events.loaded += self._inject_browser_hook
         except AttributeError:
             self._browser.loaded += self._inject_browser_hook
-        # 생성 시 지정한 좌표가 무시되는 경우가 있어 잠시 후 한 번 더 이동
-        if x is not None:
-            browser = self._browser
-
-            def _reposition():
-                try:
-                    if browser in webview.windows:
-                        browser.move(x, y)
-                except Exception:
-                    pass
-
-            t = threading.Timer(0.8, _reposition)
-            t.daemon = True
-            t.start()
+        self._place_browser(x, y, bw, bh)
 
     def _inject_browser_hook(self, window=None):
         try:
