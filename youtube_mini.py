@@ -103,8 +103,12 @@ def _user32():
     u.GetWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
     u.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+    u.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
     _USER32 = u
     return u
+
+
+WM_NCLBUTTONDOWN, HTCAPTION = 0x00A1, 2
 
 
 GW_HWNDNEXT = 2
@@ -356,18 +360,21 @@ MINI_HOOK_JS = r"""
     if (a) a.show_menu(Math.round(e.screenX * dpr), Math.round(e.screenY * dpr));
   }, true);
 
-  // 실드 좌클릭 드래그 = 창 이동
+  // 실드 좌클릭 드래그 = 창 이동.
+  // start_drag(네이티브 이동 루프)가 성공하면 OS 가 마우스를 가져가
+  // 아래 pointermove 폴백은 자연히 조용해진다 — 프레임 단위로 부드럽게.
   var dragging = false, dgX = 0, dgY = 0, dgLast = 0;
   shield.addEventListener('pointerdown', function(e){
     if (e.button !== 0) return;
     e.preventDefault();
     var a = api(); if (a) a.hide_menu();
     dragging = true; dgX = e.screenX; dgY = e.screenY; dgLast = 0;
-    if (a) a.begin_move();
+    if (a){ a.begin_move(); a.start_drag(); }
     shield.setPointerCapture(e.pointerId);
   });
   shield.addEventListener('pointermove', function(e){
     if (!dragging) return;
+    if (e.buttons === 0){ dragging = false; return; }   // 네이티브 드래그 후 잔여 상태 정리
     var now = Date.now();
     if (now - dgLast < 16) return;
     dgLast = now;
@@ -375,6 +382,17 @@ MINI_HOOK_JS = r"""
   });
   shield.addEventListener('pointerup', function(){ dragging = false; });
   shield.addEventListener('pointercancel', function(){ dragging = false; });
+
+  // 좌우 방향키 = 5초 뒤로/앞으로 (포커스 위치와 무관하게 동작)
+  document.addEventListener('keydown', function(e){
+    if (urlVisible()) return;
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    var v = vid(); if (!v) return;
+    e.preventDefault(); e.stopImmediatePropagation();   // 유튜브 자체 처리와 중복 방지
+    var d = (e.key === 'ArrowRight') ? 5 : -5;
+    try { v.currentTime = Math.max(0, v.currentTime + d); } catch (err) {}
+    toast(d > 0 ? '+5초' : '-5초');
+  }, true);
 
   document.addEventListener('click', function(e){
     if (urlVisible() && !urlbox.contains(e.target)) closeUrl();
@@ -639,6 +657,20 @@ class Api:
             self._drag_origin = (self._window.x, self._window.y)
         except Exception:
             self._drag_origin = (0, 0)
+
+    def start_drag(self):
+        """네이티브 창 드래그 시작 — OS 가 이동을 직접 처리해 프레임 단위로
+        부드럽다. '타이틀바를 잡았다'(WM_NCLBUTTONDOWN+HTCAPTION)고 알리면
+        이후 마우스 이동/놓기는 Windows 의 이동 루프가 담당한다.
+        실패 환경에서는 JS 쪽 move_delta 폴백이 그대로 동작한다."""
+        try:
+            u = _user32()
+            mh = self._hwnd_of(self._window)
+            if u is not None and mh:
+                u.ReleaseCapture()
+                u.PostMessageW(mh, WM_NCLBUTTONDOWN, HTCAPTION, None)
+        except Exception:
+            pass
 
     def move_delta(self, dx, dy):
         """실드 드래그 중: 시작 위치 + 마우스 이동량으로 창 이동."""
