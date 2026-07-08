@@ -1127,15 +1127,22 @@ def _keep_topmost(api):
     if u is None:
         return
     time.sleep(3)   # 창 핸들이 메인 스레드에서 만들어질 때까지 대기
+    flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
     while True:
         time.sleep(0.7)
         try:
             if not api._config.get("onTop", True):
                 continue
+            if api._menu_open:      # 메뉴가 미니 위에 떠 있을 때 가리지 않게
+                continue
             mh = api._hwnd_of(api._window)
             if mh and u.IsWindowVisible(mh):
-                u.SetWindowPos(mh, HWND_TOPMOST, 0, 0, 0, 0,
-                               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+                # 1) 최상위 밴드 소속 보장  2) 밴드 '안'에서도 맨 위로.
+                # 이미 최상위인 창에 HWND_TOPMOST 만 다시 줘서는 밴드 내
+                # 순서가 안 바뀌어 작업표시줄(역시 최상위) 아래로 밀린
+                # 상태가 유지된다 — HWND_TOP(0) 호출이 실제로 끌어올린다.
+                u.SetWindowPos(mh, HWND_TOPMOST, 0, 0, 0, 0, flags)
+                u.SetWindowPos(mh, None, 0, 0, 0, 0, flags)   # HWND_TOP
         except Exception:
             pass
 
