@@ -1212,6 +1212,29 @@ class Api:
             pass
 
 
+def _enable_dpi_awareness():
+    """프로세스를 DPI 인식으로 설정 (창 생성 전에 호출).
+
+    개발용 python.exe 는 매니페스트로 DPI 인식이 켜져 있지만
+    PyInstaller exe 는 꺼져 있어 좌표가 가상화되고, WebView2 가 주는
+    실제 픽셀 좌표와 어긋나 우클릭 메뉴가 화면 밖에 떠 버린다.
+    """
+    try:
+        u = ctypes.windll.user32
+    except AttributeError:
+        return  # Windows 가 아님
+    try:
+        # Per-Monitor v2 (Windows 10 1703+)
+        if u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_AWARE
+    except Exception:
+        pass
+
+
 def _hide_own_console():
     """더블클릭 실행으로 생긴 전용 콘솔 창만 숨긴다.
 
@@ -1306,6 +1329,8 @@ def _keep_mini_injected(api):
 
 
 def main():
+    # DPI 인식은 어떤 창보다 먼저 설정해야 한다 (exe 좌표 어긋남 방지)
+    _enable_dpi_awareness()
     # 더블클릭 실행 시 뜨는 콘솔 창 숨김
     _hide_own_console()
     # 사용자 클릭 없이도 소리 있는 자동재생을 허용 (WebView2 전용 플래그)
