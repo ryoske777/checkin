@@ -380,9 +380,9 @@ MINI_HOOK_JS = r"""
       toast('재생 불가 영상 — 우클릭 메뉴에서 URL/홈으로 이동');
     }
 
-    if (location.href.indexOf('/watch') >= 0){
-      var a = api(); if (a) a.save_ui_state({lastUrl: location.href});
-    }
+    // (마지막 영상 저장은 파이썬 쪽에서 get_current_url 로 처리 —
+    //  내비게이션 도중 JS→파이썬 호출의 반환 콜백이 사라지며
+    //  pywebview 내부 스레드가 예외를 뱉는 문제를 피한다)
     window.dispatchEvent(new Event('resize'));   // 플레이어 크기 갱신
   }, 2000);
  } catch (err) {
@@ -1148,6 +1148,14 @@ def _keep_mini_injected(api):
     while True:
         try:
             api._inject_mini_hook()
+        except Exception:
+            pass
+        # 마지막 시청 영상 저장 (파이썬 주도라 내비게이션 중 예외도 조용히 처리)
+        try:
+            url = api._window.get_current_url()
+            if url and "/watch" in url and url != api._config.get("lastUrl"):
+                api._config.update({"lastUrl": url})
+                api._persist_later()
         except Exception:
             pass
         time.sleep(2)
