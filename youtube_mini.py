@@ -8,6 +8,9 @@
 
 실행:
     python youtube_mini.py
+    (더블클릭 실행 시 콘솔 창은 자동으로 숨겨짐.
+     아예 콘솔 없이 띄우려면: pythonw youtube_mini.py,
+     또는 파일을 youtube_mini.pyw 로 복사해 더블클릭)
 
 조작법:
   - 우클릭: 커서 위치에 별도 팝업 메뉴 창 (미니 창 크기에 갇히지 않음)
@@ -752,12 +755,16 @@ class Api:
     def _ensure_menu(self):
         if self._menu is not None and self._menu in webview.windows:
             return
+        # 1x1 크기 + 화면 밖 좌표로 생성 — hidden 이 무시되고 잠깐
+        # 표시되더라도 눈에 보일 수 없다. 실제 크기/위치는 열 때 지정.
         self._menu = webview.create_window(
             "menu",
             html=MENU_HTML,
             js_api=self,
-            width=MENU_W,
-            height=MENU_H,
+            width=1,
+            height=1,
+            x=-10000,
+            y=-10000,
             frameless=True,
             on_top=True,
             resizable=False,
@@ -839,6 +846,11 @@ class Api:
                 self._menu.evaluate_js(
                     "window.setState && setState(%s)" % json.dumps(state, ensure_ascii=False)
                 )
+            except Exception:
+                pass
+            # 생성 시 1x1 이었을 수 있으니 실측 크기로 보정 후 이동
+            try:
+                self._menu.resize(self._menu_w, self._menu_h)
             except Exception:
                 pass
             self._menu.move(x, y)
@@ -987,6 +999,30 @@ class Api:
             pass
 
 
+def _hide_own_console():
+    """더블클릭 실행으로 생긴 전용 콘솔 창만 숨긴다.
+
+    기존 터미널(cmd/PowerShell)에서 실행한 경우에는 그 터미널까지 숨기면
+    안 되므로, 이 콘솔을 쓰는 프로세스가 우리 하나뿐일 때만 숨긴다.
+    (아예 콘솔 없이 실행하려면 pythonw youtube_mini.py 또는 .pyw 확장자 사용)
+    """
+    try:
+        k = ctypes.windll.kernel32
+    except AttributeError:
+        return  # Windows 가 아님
+    try:
+        k.GetConsoleWindow.restype = ctypes.c_void_p
+        hwnd = k.GetConsoleWindow()
+        if not hwnd:
+            return
+        procs = (wintypes.DWORD * 4)()
+        n = k.GetConsoleProcessList(procs, 4)
+        if n == 1:
+            ctypes.windll.user32.ShowWindow(ctypes.c_void_p(hwnd), SW_HIDE)
+    except Exception:
+        pass
+
+
 def _keep_mini_injected(api):
     """미니 UI 주입 자가치유 루프.
 
@@ -1005,6 +1041,8 @@ def _keep_mini_injected(api):
 
 
 def main():
+    # 더블클릭 실행 시 뜨는 콘솔 창 숨김
+    _hide_own_console()
     # 사용자 클릭 없이도 소리 있는 자동재생을 허용 (WebView2 전용 플래그)
     os.environ.setdefault(
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
