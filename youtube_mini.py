@@ -87,8 +87,42 @@ def _user32():
     ]
     u.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
     u.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+    u.MonitorFromPoint.restype = ctypes.c_void_p
+    u.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+    u.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     _USER32 = u
     return u
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
+MONITOR_DEFAULTTONEAREST = 2
+
+
+def _work_area_at(x, y):
+    """(x, y)가 속한 모니터의 작업영역 (물리 px). 실패 시 None."""
+    u = _user32()
+    if u is None:
+        return None
+    try:
+        hmon = u.MonitorFromPoint(wintypes.POINT(int(x), int(y)), MONITOR_DEFAULTTONEAREST)
+        if not hmon:
+            return None
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not u.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            return None
+        r = mi.rcWork
+        return (r.left, r.top, r.right, r.bottom)
+    except Exception:
+        return None
 
 
 def _win_title(u, hwnd):
@@ -757,6 +791,27 @@ class Api:
         except Exception:
             pass
 
+    def _menu_pos(self, x, y):
+        """커서 기준 메뉴 위치. 공간이 부족한 쪽은 네이티브 메뉴처럼
+        커서 반대편(왼쪽/위쪽)으로 뒤집고, 모니터 작업영역 안으로 보정."""
+        w, h = self._menu_w, self._menu_h
+        area = _work_area_at(x, y)
+        if area is None:
+            # Windows API 를 못 쓰면 주 화면 크기로 근사
+            try:
+                s = webview.screens[0]
+                area = (0, 0, s.width, s.height)
+            except Exception:
+                return x, y
+        left, top, right, bottom = area
+        if x + w > right:
+            x = x - w          # 오른쪽 공간 부족 → 커서 왼쪽으로
+        if y + h > bottom:
+            y = y - h          # 아래 공간 부족 → 커서 위쪽으로
+        x = max(left, min(x, right - w))
+        y = max(top, min(y, bottom - h))
+        return x, y
+
     def show_menu(self, sx, sy):
         """커서 위치(물리 좌표)에 팝업 메뉴 표시. 열려 있으면 닫기(토글)."""
         if self._menu_open:
@@ -778,16 +833,7 @@ class Api:
         except Exception:
             pass
         try:
-            x, y = int(sx), int(sy)
-            try:
-                s = webview.screens[0]
-                # 주 모니터 안에서 열릴 때만 화면 밖으로 나가지 않게 보정
-                if 0 <= x < s.width:
-                    x = min(x, s.width - self._menu_w)
-                if 0 <= y < s.height:
-                    y = min(y, s.height - self._menu_h)
-            except Exception:
-                pass
+            x, y = self._menu_pos(int(sx), int(sy))
             try:
                 self._menu.evaluate_js(
                     "window.setState && setState(%s)" % json.dumps(state, ensure_ascii=False)
