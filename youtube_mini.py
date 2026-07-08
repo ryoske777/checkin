@@ -12,6 +12,11 @@
      아예 콘솔 없이 띄우려면: pythonw youtube_mini.py,
      또는 파일을 youtube_mini.pyw 로 복사해 더블클릭)
 
+단일 exe 만들기 (파이썬 없는 PC 에서도 실행):
+    build_exe.bat 더블클릭 → dist\\YTMini.exe 생성.
+    exe 하나만 복사하면 되고, 콘솔 창 없이 프로그램만 뜬다.
+    대상 PC 에는 WebView2 런타임만 필요 (Win10/11 대부분 기본 탑재).
+
 조작법:
   - 우클릭: 커서 위치에 별도 팝업 메뉴 창 (미니 창 크기에 갇히지 않음)
       재생/일시정지, 음소거, 다음/이전 영상, URL 열기,
@@ -595,7 +600,10 @@ class Api:
 
     def log(self, msg):
         """주입 스크립트의 오류를 콘솔·로그 파일에서 확인할 수 있게 출력."""
-        print("[mini]", msg)
+        try:
+            print("[mini]", msg)   # --noconsole exe 에선 stdout 이 없어 실패할 수 있음
+        except Exception:
+            pass
         _log_file(msg)
 
     def on_geometry_change(self, *args):
