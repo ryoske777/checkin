@@ -939,13 +939,21 @@ class Api:
                 self._notify.Dispose()
         except Exception:
             pass
-        for w in (self._menu, self._browser):
+        for w in (self._menu, self._browser, self._logwin):
             try:
                 if w is not None and w in webview.windows:
                     w.destroy()
             except Exception:
                 pass
-        self._window.destroy()
+        try:
+            self._window.destroy()
+        except Exception:
+            pass
+        # 창 파괴 후에도 백그라운드 스레드(주입 루프 등)가 프로세스를
+        # 붙잡아 좀비로 남지 않게 — 잠시 후 무조건 프로세스 종료
+        t = threading.Timer(1.5, os._exit, args=(0,))
+        t.daemon = True
+        t.start()
 
     # ---- 카멜레온 모드 ----
 
@@ -1977,6 +1985,12 @@ def _keep_mini_injected(api):
         _log_file("apply_opacity failed: %r" % (e,))
     chrome_stripped = False
     while True:
+        # 미니 창이 닫혔으면 루프도 종료 — 프로세스가 좀비로 남지 않게
+        try:
+            if api._window not in webview.windows:
+                return
+        except Exception:
+            pass
         try:
             api._inject_mini_hook()
         except Exception:
@@ -2108,6 +2122,14 @@ def main():
     # 로그인 세션(쿠키)을 유지해 홈/구독 창에서 한 번 로그인하면 계속 사용.
     os.makedirs(PROFILE_DIR, exist_ok=True)
     webview.start(_keep_mini_injected, (api,), private_mode=False, storage_path=PROFILE_DIR)
+
+    # GUI 루프 종료(모든 창 닫힘) 후: 남은 백그라운드 스레드와 무관하게
+    # 프로세스를 확실히 종료해 좀비(뮤텍스 잔류 → '이미 실행 중' 팝업) 방지
+    try:
+        save_config(api._config)
+    except Exception:
+        pass
+    os._exit(0)
 
 
 if __name__ == "__main__":
