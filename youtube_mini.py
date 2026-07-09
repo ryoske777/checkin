@@ -265,6 +265,13 @@ def save_config(cfg):
         _log_file("save_config failed: %r" % (e,))
 
 
+def _icon_path():
+    """앱 아이콘(icon.ico) 경로 — exe 에 번들된 경우(_MEIPASS)도 지원."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(base, "icon.ico")
+    return p if os.path.exists(p) else None
+
+
 def _log_file(msg):
     """콘솔이 숨겨져 있어도 확인할 수 있는 진단 로그 (~/.yt_mini_profile/mini.log)."""
     try:
@@ -1466,8 +1473,12 @@ class Api:
                                                   ToolStripMenuItem)
                 from System.Drawing import Icon, SystemIcons
                 ni = NotifyIcon()
+                ip = _icon_path()
                 try:
-                    ni.Icon = Icon.ExtractAssociatedIcon(sys.executable)
+                    if ip:
+                        ni.Icon = Icon(ip)          # 전용 앱 아이콘
+                    else:
+                        ni.Icon = Icon.ExtractAssociatedIcon(sys.executable)
                 except Exception:
                     ni.Icon = SystemIcons.Application
                 ni.Text = "YT Mini"
@@ -2036,12 +2047,26 @@ def _keep_mini_injected(api):
             api._inject_mini_hook()
         except Exception:
             pass
-        # 창 핸들이 준비되면 한 번만: DWM 그림자/둥근 모서리 제거
+        # 창 핸들이 준비되면 한 번만: DWM 그림자/둥근 모서리 제거 + 앱 아이콘 적용
         if not chrome_stripped:
             try:
                 mh = api._hwnd_of(api._window)
                 if mh:
                     _strip_window_chrome(mh)
+                    ip = _icon_path()
+                    if ip:
+                        native = getattr(api._window, "native", None)
+                        if native is not None and hasattr(native, "BeginInvoke"):
+                            import System
+
+                            def _set_icon():
+                                try:
+                                    from System.Drawing import Icon
+                                    native.Icon = Icon(ip)
+                                except Exception:
+                                    pass
+
+                            native.BeginInvoke(System.Action(_set_icon))
                     chrome_stripped = True
             except Exception:
                 chrome_stripped = True
