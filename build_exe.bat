@@ -25,9 +25,17 @@ if errorlevel 1 (
     if errorlevel 1 goto fail
 )
 
+set ICON_OPTS=
+if exist icon.ico (
+    set ICON_OPTS=--icon icon.ico --add-data "icon.ico;."
+) else (
+    echo NOTE: icon.ico not found - building with default icon.
+    echo       Copy icon.ico next to this file to use the custom icon.
+)
+
 echo.
 echo Building YTMini.exe ...
-python -m PyInstaller --onefile --noconsole --clean --name YTMini --icon icon.ico --add-data "icon.ico;." --hidden-import webview.platforms.winforms --hidden-import webview.platforms.edgechromium --collect-all webview youtube_mini.py
+python -m PyInstaller --onefile --noconsole --clean --name YTMini %ICON_OPTS% --hidden-import webview.platforms.winforms --hidden-import webview.platforms.edgechromium --collect-all webview youtube_mini.py
 if errorlevel 1 goto fail
 
 echo.
