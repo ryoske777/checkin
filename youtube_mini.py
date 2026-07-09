@@ -73,6 +73,7 @@ YT_ID_RE = re.compile(r"(?:youtu\.be/|[?&]v=|shorts/|live/)([A-Za-z0-9_-]{11})")
 BROWSER_URLS = {
     "home": "https://www.youtube.com/",
     "subs": "https://www.youtube.com/feed/subscriptions",
+    "music": "https://music.youtube.com/",
 }
 
 
@@ -325,6 +326,13 @@ MINI_HOOK_JS = r"""
     '#__mini_shield { position:fixed; left:0; top:0; right:0; bottom:0; z-index:9500; }',
     '#__mini_still { position:fixed; left:0; top:0; width:100%; height:100%;',
     '  z-index:9400; display:none; background:#000; }',
+    '/* YouTube Music: 내비/플레이어바 숨기고 플레이어만 꽉 차게 */',
+    'ytmusic-nav-bar, ytmusic-player-bar, #side-panel { display:none !important; }',
+    'ytmusic-app-layout { --ytmusic-nav-bar-height: 0px !important; }',
+    'ytmusic-player-page { padding:0 !important; margin:0 !important; top:0 !important; }',
+    '#main-panel { padding:0 !important; margin:0 !important; }',
+    'ytmusic-player, #player.ytmusic-player { width:100vw !important; height:100vh !important;',
+    '  max-width:none !important; min-width:0 !important; margin:0 !important; }',
     '#__mini_grip { position:fixed; right:0; bottom:0; width:16px; height:16px;',
     '  z-index:10001; cursor:nwse-resize; opacity:0.45; }',
     '#__mini_grip:hover { opacity:1; }',
@@ -381,8 +389,16 @@ MINI_HOOK_JS = r"""
     v.volume = p / 100;
     if (p > 0 && v.muted) v.muted = false;   // 볼륨을 올리면 음소거 해제
   }
-  function nextVideo(){ var b = document.querySelector('.ytp-next-button'); if (b) b.click(); }
-  function prevVideo(){ history.back(); }
+  function nextVideo(){
+    var b = document.querySelector('.ytp-next-button')
+         || document.querySelector('ytmusic-player-bar .next-button');
+    if (b) b.click();
+  }
+  function prevVideo(){
+    var b = document.querySelector('ytmusic-player-bar .previous-button');
+    if (b){ b.click(); return; }
+    history.back();
+  }
 
   function toWatchUrl(s){
     s = (s || '').trim();
@@ -586,6 +602,7 @@ MENU_HTML = r"""<!DOCTYPE html>
     ['url',        function(){ return 'URL 열기'; }],
     ['home',       function(){ return 'YT 홈'; }],
     ['subs',       function(){ return '구독 목록'; }],
+    ['music',      function(){ return '유튜브 뮤직'; }],
     ['ontop',      function(){ return (st.onTop ? '✓ ' : '') + '항상 위'; }],
     ['cham',       function(){ return (st.cham ? '✓ ' : '') + '카멜레온 모드'; }],
     ['still',      function(){ return (st.still ? '✓ ' : '') + '스틸컷 재생'; }],
@@ -689,6 +706,8 @@ class Api:
         self._logwin = None
         self._notify = None       # 트레이 아이콘 (WinForms NotifyIcon)
         self._in_tray = False
+        self._tray_play_item = None
+        self._playing = False     # 2초 주기 루프가 갱신하는 재생 상태 캐시
         self._engine_ok = False   # loaded 이벤트 수신 = WebView2 정상
         self._menu_w, self._menu_h = MENU_W, MENU_H
         self._config = config if isinstance(config, dict) else {}
@@ -1292,7 +1311,7 @@ class Api:
         try:
             if name in page_calls:
                 self._window.evaluate_js(page_calls[name])
-            elif name in ("home", "subs"):
+            elif name in ("home", "subs", "music"):
                 self.open_browser(name)
             elif name == "ontop":
                 self.set_on_top(not self._config.get("onTop", True))
@@ -1370,11 +1389,19 @@ class Api:
                 ni.Text = "YT Mini"
                 menu = ContextMenuStrip()
                 mi_open = ToolStripMenuItem("열기")
-                mi_quit = ToolStripMenuItem("종료")
-                mi_open.Click += lambda s, e: self._restore_from_tray()
-                mi_quit.Click += lambda s, e: self.quit()
-                menu.Items.Add(mi_open)
-                menu.Items.Add(mi_quit)
+                mi_play = ToolStripMenuItem("재생")
+                mi_next = ToolStripMenuItem("다음")
+                mi_prev = ToolStripMenuItem("이전")
+                mi_quit = ToolStripMenuItem("닫기")
+                mi_open.Click += lambda s, e: self._tray_cmd("open")
+                mi_play.Click += lambda s, e: self._tray_cmd("play")
+                mi_next.Click += lambda s, e: self._tray_cmd("next")
+                mi_prev.Click += lambda s, e: self._tray_cmd("prev")
+                mi_quit.Click += lambda s, e: self._tray_cmd("quit")
+                for it in (mi_open, mi_play, mi_next, mi_prev, mi_quit):
+                    menu.Items.Add(it)
+                self._tray_play_item = mi_play
+                menu.Opening += self._on_tray_menu_opening
                 ni.ContextMenuStrip = menu
                 ni.MouseClick += self._on_tray_click
                 ni.Visible = True
@@ -1393,6 +1420,36 @@ class Api:
             return False
         done.wait(3)
         return ok[0]
+
+    def _on_tray_menu_opening(self, sender, e):
+        """트레이 메뉴가 열릴 때 재생/멈춤 라벨을 현재 상태로 갱신."""
+        try:
+            if self._tray_play_item is not None:
+                self._tray_play_item.Text = "멈춤" if self._playing else "재생"
+        except Exception:
+            pass
+
+    def _tray_cmd(self, name):
+        """트레이 메뉴 클릭 처리.
+
+        클릭 핸들러는 UI 스레드에서 실행되는데 거기서 evaluate_js 를
+        동기 호출하면 결과 콜백이 같은 UI 스레드를 기다려 교착된다 —
+        반드시 별도 스레드로 넘긴다.
+        """
+        def run():
+            try:
+                if name == "open":
+                    self._restore_from_tray()
+                elif name == "quit":
+                    self.quit()
+                else:
+                    if name == "play":
+                        self._playing = not self._playing   # 라벨 즉시 반영
+                    self.menu_action(name)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _on_tray_click(self, sender, e):
         try:
@@ -1587,10 +1644,16 @@ class Api:
             pass
 
     def play_in_mini(self, url, title=None):
-        """브라우저 창에서 영상 클릭 시: 그 창을 숨기고 미니에서 재생."""
+        """브라우저 창에서 영상 클릭 시: 그 창을 숨기고 미니에서 재생.
+
+        유튜브 뮤직에서 온 링크는 music.youtube.com 도메인을 유지해
+        뮤직의 자동 재생목록(다음 곡)이 그대로 이어지게 한다.
+        """
         m = YT_ID_RE.search(url or "")
         if m:
-            url = "https://www.youtube.com/watch?v=" + m.group(1)
+            host = ("music.youtube.com" if "music.youtube.com" in (url or "")
+                    else "www.youtube.com")
+            url = "https://%s/watch?v=%s" % (host, m.group(1))
         try:
             if self._browser is not None and self._browser in webview.windows:
                 self._browser.hide()
@@ -1778,11 +1841,39 @@ def _engine_watchdog(api):
     _relaunch()
 
 
-def _keep_topmost(api):
-    """'항상 위'가 켜져 있는 동안 최상위 z순서를 주기적으로 재단언.
+def _taskbar_above(u, mini):
+    """작업표시줄이 미니와 겹친 채 z순서상 미니보다 위에 있는지."""
+    try:
+        rm = wintypes.RECT()
+        u.GetWindowRect(mini, ctypes.byref(rm))
+        hw = u.GetTopWindow(None)
+        for _ in range(2000):
+            if not hw:
+                return False
+            hw_i = int(hw)
+            if hw_i == mini:
+                return False
+            buf = ctypes.create_unicode_buffer(64)
+            u.GetClassNameW(ctypes.c_void_p(hw_i), buf, 64)
+            if (buf.value in ("Shell_TrayWnd", "Shell_SecondaryTrayWnd")
+                    and u.IsWindowVisible(hw_i)):
+                r = wintypes.RECT()
+                u.GetWindowRect(ctypes.c_void_p(hw_i), ctypes.byref(r))
+                if not (r.right <= rm.left or r.left >= rm.right
+                        or r.bottom <= rm.top or r.top >= rm.bottom):
+                    return True
+            hw = u.GetWindow(ctypes.c_void_p(hw_i), GW_HWNDNEXT)
+        return False
+    except Exception:
+        return False
 
-    작업표시줄도 최상위 창이라 클릭하면 그 위로 올라오는데, 재단언으로
-    미니 창이 작업표시줄까지 덮은 상태를 유지한다.
+
+def _keep_topmost(api):
+    """'항상 위'가 켜져 있는 동안 작업표시줄 위 상태를 유지.
+
+    작업표시줄도 최상위 창이라 클릭하면 그 위로 올라온다. 다만 매 주기
+    무조건 z순서를 재배치하면 DWM 재합성으로 화면이 깜빡이므로,
+    '작업표시줄이 실제로 미니를 덮고 있을 때만' 끌어올린다.
     """
     u = _user32()
     if u is None:
@@ -1797,13 +1888,14 @@ def _keep_topmost(api):
             if api._menu_open:      # 메뉴가 미니 위에 떠 있을 때 가리지 않게
                 continue
             mh = api._hwnd_of(api._window)
-            if mh and u.IsWindowVisible(mh):
-                # 1) 최상위 밴드 소속 보장  2) 밴드 '안'에서도 맨 위로.
-                # 이미 최상위인 창에 HWND_TOPMOST 만 다시 줘서는 밴드 내
-                # 순서가 안 바뀌어 작업표시줄(역시 최상위) 아래로 밀린
-                # 상태가 유지된다 — HWND_TOP(0) 호출이 실제로 끌어올린다.
-                u.SetWindowPos(mh, HWND_TOPMOST, 0, 0, 0, 0, flags)
-                u.SetWindowPos(mh, None, 0, 0, 0, 0, flags)   # HWND_TOP
+            if not (mh and u.IsWindowVisible(mh)):
+                continue
+            if not _taskbar_above(u, mh):
+                continue            # 필요할 때만 재단언 → 깜빡임 없음
+            # 1) 최상위 밴드 소속 보장  2) 밴드 '안'에서도 맨 위로.
+            # (HWND_TOPMOST 만으로는 밴드 내 순서가 안 바뀜 — HWND_TOP 필요)
+            u.SetWindowPos(mh, HWND_TOPMOST, 0, 0, 0, 0, flags)
+            u.SetWindowPos(mh, None, 0, 0, 0, 0, flags)   # HWND_TOP
         except Exception:
             pass
 
@@ -1847,14 +1939,16 @@ def _keep_mini_injected(api):
                 if clean != api._config.get("lastUrl"):
                     api._config.update({"lastUrl": clean, "lastTime": 0})
                     changed = True
-                t = api._window.evaluate_js(
+                pv = api._window.evaluate_js(
                     "(function(){var v=document.querySelector('video');"
-                    "return v ? Math.floor(v.currentTime||0) : -1;})()"
+                    "return v ? ((v.paused?'1':'0')+'|'+Math.floor(v.currentTime||0)) : '';})()"
                 )
-                if (isinstance(t, (int, float)) and t >= 0
-                        and abs(int(t) - int(api._config.get("lastTime", 0) or 0)) >= 5):
-                    api._config.update({"lastTime": int(t)})
-                    changed = True
+                if pv and "|" in pv:
+                    api._playing = pv[0] == "0"   # 트레이 메뉴 라벨용 캐시
+                    t = int(pv.split("|", 1)[1])
+                    if abs(t - int(api._config.get("lastTime", 0) or 0)) >= 5:
+                        api._config.update({"lastTime": t})
+                        changed = True
                 if changed:
                     api._persist_later()
         except Exception:
