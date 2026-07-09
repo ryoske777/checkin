@@ -27,7 +27,7 @@ if errorlevel 1 (
 
 echo.
 echo Building YTMini.exe ...
-python -m PyInstaller --onefile --noconsole --clean --name YTMini --hidden-import webview.platforms.winforms --hidden-import webview.platforms.edgechromium --collect-all webview youtube_mini.py
+python -m PyInstaller --onefile --noconsole --clean --name YTMini --icon icon.ico --add-data "icon.ico;." --hidden-import webview.platforms.winforms --hidden-import webview.platforms.edgechromium --collect-all webview youtube_mini.py
 if errorlevel 1 goto fail
 
 echo.
