@@ -74,6 +74,7 @@ BROWSER_URLS = {
     "home": "https://www.youtube.com/",
     "subs": "https://www.youtube.com/feed/subscriptions",
     "music": "https://music.youtube.com/",
+    "mlib": "https://music.youtube.com/library/playlists",
 }
 
 
@@ -333,6 +334,10 @@ MINI_HOOK_JS = r"""
     '#main-panel { padding:0 !important; margin:0 !important; }',
     'ytmusic-player, #player.ytmusic-player { width:100vw !important; height:100vh !important;',
     '  max-width:none !important; min-width:0 !important; margin:0 !important; }',
+    '/* 영상 위에 뜨는 뮤직 오버레이 버튼(셔플/이전/재생/다음/반복) 숨김 —',
+    '   실드에 가려 클릭도 안 되므로 시각적 소음만 됨. 조작은 메뉴로. */',
+    'ytmusic-player .song-media-controls, #song-media-window .song-media-controls',
+    '{ display:none !important; }',
     '#__mini_grip { position:fixed; right:0; bottom:0; width:16px; height:16px;',
     '  z-index:10001; cursor:nwse-resize; opacity:0.45; }',
     '#__mini_grip:hover { opacity:1; }',
@@ -356,7 +361,7 @@ MINI_HOOK_JS = r"""
   var shield = document.createElement('div'); shield.id = '__mini_shield';
   var urlbox = document.createElement('div'); urlbox.id = '__mini_url';
   var urlinput = document.createElement('input');
-  urlinput.placeholder = 'YouTube URL 또는 영상 ID · Enter';
+  urlinput.placeholder = '검색어 / YouTube URL · Enter';
   urlbox.appendChild(urlinput);
   var toastEl = document.createElement('div'); toastEl.id = '__mini_toast';
   var grip = document.createElement('div'); grip.id = '__mini_grip';
@@ -398,6 +403,26 @@ MINI_HOOK_JS = r"""
     var b = document.querySelector('ytmusic-player-bar .previous-button');
     if (b){ b.click(); return; }
     history.back();
+  }
+  // 뮤직 전용 컨트롤 — 플레이어바는 CSS 로 숨겨져 있지만
+  // JS click() 은 숨겨진 요소에도 동작한다.
+  function shuffleMusic(){
+    var b = document.querySelector('ytmusic-player-bar .shuffle');
+    if (b){ b.click(); toast('셔플'); return; }
+    toast('셔플은 유튜브 뮤직에서만 돼요');
+  }
+  function repeatMusic(){
+    var b = document.querySelector('ytmusic-player-bar .repeat');
+    if (b){ b.click(); toast('반복 모드 전환'); return; }
+    toast('반복은 유튜브 뮤직에서만 돼요');
+  }
+  // 뮤직의 노래(앨범아트) <-> 동영상 토글
+  function toggleAvMode(){
+    var tabs = document.querySelectorAll('ytmusic-av-toggle tp-yt-paper-tab');
+    if (!tabs.length){ toast('노래/영상 전환은 뮤직 재생 중에만 돼요'); return; }
+    for (var i = 0; i < tabs.length; i++){
+      if (!tabs[i].classList.contains('iron-selected')){ tabs[i].click(); return; }
+    }
   }
 
   function toWatchUrl(s){
@@ -450,6 +475,7 @@ MINI_HOOK_JS = r"""
   window.__mini = {
     togglePlay: togglePlay, toggleMute: toggleMute, setVolume: setVolume,
     nextVideo: nextVideo, prevVideo: prevVideo,
+    shuffleMusic: shuffleMusic, repeatMusic: repeatMusic, toggleAvMode: toggleAvMode,
     openUrl: openUrl, toast: toast, setStill: setStill
   };
 
@@ -508,10 +534,12 @@ MINI_HOOK_JS = r"""
     e.stopPropagation();
     if (e.key === 'Escape'){ closeUrl(); return; }
     if (e.key !== 'Enter') return;
-    var u = toWatchUrl(urlinput.value);
-    if (!u){ toast('URL 을 인식하지 못했어요'); return; }
+    var raw = urlinput.value.trim();
+    if (!raw) return;
+    var u = toWatchUrl(raw);
     closeUrl();
-    location.href = u;
+    if (u){ location.href = u; return; }         // URL/영상 ID → 바로 재생
+    var a = api(); if (a) a.open_search(raw);    // 그 외 → 검색 (탐색 창)
   });
 
   // 우측 하단 손잡이 드래그로 창 크기 조절
@@ -599,10 +627,14 @@ MENU_HTML = r"""<!DOCTYPE html>
     ['mute',       function(){ return st.muted ? '소리 켜기' : '음소거'; }],
     ['next',       function(){ return '⏭ 다음 영상'; }],
     ['prev',       function(){ return '⏮ 이전 영상'; }],
-    ['url',        function(){ return 'URL 열기'; }],
+    ['url',        function(){ return '검색 / URL'; }],
     ['home',       function(){ return 'YT 홈'; }],
     ['subs',       function(){ return '구독 목록'; }],
     ['music',      function(){ return '유튜브 뮤직'; }],
+    ['mlib',       function(){ return '뮤직 재생목록'; }],
+    ['shuffle',    function(){ return '셔플'; }],
+    ['repeat',     function(){ return '반복 전환'; }],
+    ['avmode',     function(){ return '노래↔영상 전환'; }],
     ['ontop',      function(){ return (st.onTop ? '✓ ' : '') + '항상 위'; }],
     ['cham',       function(){ return (st.cham ? '✓ ' : '') + '카멜레온 모드'; }],
     ['still',      function(){ return (st.still ? '✓ ' : '') + '스틸컷 재생'; }],
@@ -1307,11 +1339,14 @@ class Api:
             "next": "window.__mini && __mini.nextVideo()",
             "prev": "window.__mini && __mini.prevVideo()",
             "url": "window.__mini && __mini.openUrl()",
+            "shuffle": "window.__mini && __mini.shuffleMusic()",
+            "repeat": "window.__mini && __mini.repeatMusic()",
+            "avmode": "window.__mini && __mini.toggleAvMode()",
         }
         try:
             if name in page_calls:
                 self._window.evaluate_js(page_calls[name])
-            elif name in ("home", "subs", "music"):
+            elif name in ("home", "subs", "music", "mlib"):
                 self.open_browser(name)
             elif name == "ontop":
                 self.set_on_top(not self._config.get("onTop", True))
@@ -1587,9 +1622,29 @@ class Api:
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
 
+    def open_search(self, query):
+        """검색어를 탐색 창에서 검색 — 미니가 뮤직이면 뮤직 검색으로."""
+        q = (query or "").strip()
+        if not q:
+            return
+        import urllib.parse
+        enc = urllib.parse.quote(q)
+        cur = ""
+        try:
+            cur = self._window.get_current_url() or ""
+        except Exception:
+            pass
+        if "music.youtube.com" in cur:
+            url = "https://music.youtube.com/search?q=" + enc
+        else:
+            url = "https://www.youtube.com/results?search_query=" + enc
+        self._open_browser_url(url)
+
     def open_browser(self, which):
-        """YT 홈/구독을 보는 일반 브라우저 창. 이미 열려 있으면 재사용."""
-        url = BROWSER_URLS.get(which, BROWSER_URLS["home"])
+        """YT 홈/구독/뮤직을 보는 일반 브라우저 창. 이미 열려 있으면 재사용."""
+        self._open_browser_url(BROWSER_URLS.get(which, BROWSER_URLS["home"]))
+
+    def _open_browser_url(self, url):
         bw, bh = 1000, 650
         x, y = self._browser_geometry(bw, bh)
         if self._browser is not None and self._browser in webview.windows:
@@ -1653,7 +1708,12 @@ class Api:
         if m:
             host = ("music.youtube.com" if "music.youtube.com" in (url or "")
                     else "www.youtube.com")
-            url = "https://%s/watch?v=%s" % (host, m.group(1))
+            new = "https://%s/watch?v=%s" % (host, m.group(1))
+            # 재생목록 컨텍스트 유지 — 다음 곡이 재생목록 순서로 이어진다
+            lm = re.search(r"[?&]list=([A-Za-z0-9_-]+)", url or "")
+            if lm:
+                new += "&list=" + lm.group(1)
+            url = new
         try:
             if self._browser is not None and self._browser in webview.windows:
                 self._browser.hide()
