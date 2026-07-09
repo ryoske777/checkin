@@ -236,7 +236,7 @@ def _norm_title(title):
 
 
 SW_HIDE, SW_SHOWNOACTIVATE, GA_ROOT = 0, 4, 2
-HWND_TOPMOST = -1
+HWND_TOPMOST, HWND_NOTOPMOST = -1, -2
 SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER = 0x0001, 0x0002, 0x0004
 SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x0010, 0x0040
 MENU_PARK = (-10000, -10000)   # 메뉴 창 '주차' 위치 (화면 밖)
@@ -779,6 +779,7 @@ class Api:
         self._notify = None       # 트레이 아이콘 (WinForms NotifyIcon)
         self._in_tray = False
         self._tray_play_item = None
+        self._tray_ontop_item = None
         self._playing = False     # 2초 주기 루프가 갱신하는 재생 상태 캐시
         self._engine_ok = False   # loaded 이벤트 수신 = WebView2 정상
         self._menu_w, self._menu_h = MENU_W, MENU_H
@@ -843,12 +844,23 @@ class Api:
         self._config.update({"onTop": flag})
         self._persist_later()
         native = getattr(self._window, "native", None)
-        if self._on_ui_thread(lambda: setattr(native, "TopMost", flag)):
-            return
-        try:
-            self._window.on_top = flag
-        except Exception:
-            pass
+        applied = self._on_ui_thread(lambda: setattr(native, "TopMost", flag))
+        if not applied:
+            try:
+                self._window.on_top = flag
+            except Exception:
+                pass
+        # 켜는 즉시 작업표시줄 위까지 끌어올린다 (루프 대기 없이)
+        if flag:
+            try:
+                u = _user32()
+                mh = self._hwnd_of(self._window)
+                if u and mh:
+                    f = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                    u.SetWindowPos(mh, HWND_TOPMOST, 0, 0, 0, 0, f)
+                    u.SetWindowPos(mh, None, 0, 0, 0, 0, f)
+            except Exception:
+                pass
 
     def set_volume(self, pct):
         """볼륨 슬라이더 (0~100%). 볼륨을 올리면 음소거도 해제."""
@@ -1487,15 +1499,18 @@ class Api:
                 mi_play = ToolStripMenuItem("재생")
                 mi_next = ToolStripMenuItem("다음")
                 mi_prev = ToolStripMenuItem("이전")
+                mi_top = ToolStripMenuItem("항상 위 끄기")
                 mi_quit = ToolStripMenuItem("닫기")
                 mi_open.Click += lambda s, e: self._tray_cmd("open")
                 mi_play.Click += lambda s, e: self._tray_cmd("play")
                 mi_next.Click += lambda s, e: self._tray_cmd("next")
                 mi_prev.Click += lambda s, e: self._tray_cmd("prev")
+                mi_top.Click += lambda s, e: self._tray_cmd("ontop")
                 mi_quit.Click += lambda s, e: self._tray_cmd("quit")
-                for it in (mi_open, mi_play, mi_next, mi_prev, mi_quit):
+                for it in (mi_open, mi_play, mi_next, mi_prev, mi_top, mi_quit):
                     menu.Items.Add(it)
                 self._tray_play_item = mi_play
+                self._tray_ontop_item = mi_top
                 menu.Opening += self._on_tray_menu_opening
                 ni.ContextMenuStrip = menu
                 ni.MouseClick += self._on_tray_click
@@ -1517,10 +1532,14 @@ class Api:
         return ok[0]
 
     def _on_tray_menu_opening(self, sender, e):
-        """트레이 메뉴가 열릴 때 재생/멈춤 라벨을 현재 상태로 갱신."""
+        """트레이 메뉴가 열릴 때 재생/멈춤·항상 위 라벨을 현재 상태로 갱신."""
         try:
             if self._tray_play_item is not None:
                 self._tray_play_item.Text = "멈춤" if self._playing else "재생"
+            if self._tray_ontop_item is not None:
+                self._tray_ontop_item.Text = (
+                    "항상 위 끄기" if self._config.get("onTop", True) else "항상 위 켜기"
+                )
         except Exception:
             pass
 
@@ -1537,6 +1556,8 @@ class Api:
                     self._restore_from_tray()
                 elif name == "quit":
                     self.quit()
+                elif name == "ontop":
+                    self.set_on_top(not self._config.get("onTop", True))
                 else:
                     if name == "play":
                         self._playing = not self._playing   # 라벨 즉시 반영
@@ -1557,24 +1578,7 @@ class Api:
 
     def _restore_from_tray(self):
         self._in_tray = False
-        # 트레이 아이콘 숨김 (UI 스레드)
-        try:
-            if self._notify is not None:
-                native = getattr(self._window, "native", None)
-
-                def _hide_icon():
-                    try:
-                        self._notify.Visible = False
-                    except Exception:
-                        pass
-
-                try:
-                    import System
-                    native.BeginInvoke(System.Action(_hide_icon))
-                except Exception:
-                    _hide_icon()
-        except Exception:
-            pass
+        # 트레이 아이콘은 상시 표시 유지 (창 찾기/항상 위 토글용) — 숨기지 않음
         # 창 복원 (표시 + 최상위, 포커스 안 뺏음)
         try:
             u = _user32()
@@ -2003,12 +2007,24 @@ def _keep_topmost(api):
     while True:
         time.sleep(0.7)
         try:
-            if not api._config.get("onTop", True):
-                continue
-            if api._menu_open:      # 메뉴가 미니 위에 떠 있을 때 가리지 않게
-                continue
             mh = api._hwnd_of(api._window)
             if not (mh and u.IsWindowVisible(mh)):
+                continue
+            if not api._config.get("onTop", True):
+                # 항상 위가 꺼진 채 작업표시줄 뒤에 깔린 경우: 사용자가
+                # 작업표시줄 아이콘으로 앱을 활성화하면 3초간 위로 꺼내줘
+                # 잡아서 옮길 수 있게 한다
+                fg = u.GetForegroundWindow()
+                fg_root = int(u.GetAncestor(fg, GA_ROOT) or 0) if fg else 0
+                if fg_root == mh and _taskbar_above(u, mh):
+                    f = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                    u.SetWindowPos(mh, HWND_TOPMOST, 0, 0, 0, 0, f)
+                    u.SetWindowPos(mh, None, 0, 0, 0, 0, f)
+                    time.sleep(3)
+                    if not api._config.get("onTop", True):   # 그 사이 안 켰으면 원복
+                        u.SetWindowPos(mh, HWND_NOTOPMOST, 0, 0, 0, 0, f)
+                continue
+            if api._menu_open:      # 메뉴가 미니 위에 떠 있을 때 가리지 않게
                 continue
             if not _taskbar_above(u, mh):
                 continue            # 필요할 때만 재단언 → 깜빡임 없음
@@ -2036,6 +2052,7 @@ def _keep_mini_injected(api):
     except Exception as e:
         _log_file("apply_opacity failed: %r" % (e,))
     chrome_stripped = False
+    tray_ready = False
     while True:
         # 미니 창이 닫혔으면 루프도 종료 — 프로세스가 좀비로 남지 않게
         try:
@@ -2070,6 +2087,13 @@ def _keep_mini_injected(api):
                     chrome_stripped = True
             except Exception:
                 chrome_stripped = True
+        # 트레이 아이콘 상시 표시 — 창이 작업표시줄 뒤에 깔려도
+        # 아이콘 우클릭 메뉴(항상 위 켜기/끄기 포함)로 항상 제어 가능
+        if not tray_ready and chrome_stripped:
+            try:
+                tray_ready = api._ensure_notify_icon()
+            except Exception:
+                tray_ready = True
         # 마지막 시청 영상 + 재생 위치 저장 (파이썬 주도라 예외도 조용히 처리)
         try:
             url = api._window.get_current_url()
