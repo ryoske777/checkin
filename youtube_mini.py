@@ -334,10 +334,17 @@ MINI_HOOK_JS = r"""
     '#main-panel { padding:0 !important; margin:0 !important; }',
     'ytmusic-player, #player.ytmusic-player { width:100vw !important; height:100vh !important;',
     '  max-width:none !important; min-width:0 !important; margin:0 !important; }',
-    '/* 영상 위에 뜨는 뮤직 오버레이 버튼(셔플/이전/재생/다음/반복) 숨김 —',
-    '   실드에 가려 클릭도 안 되므로 시각적 소음만 됨. 조작은 메뉴로. */',
-    'ytmusic-player .song-media-controls, #song-media-window .song-media-controls',
+    '/* 영상 위에 뜨는 뮤직 자체 UI(셔플/이전/다음/반복, 노래/동영상 탭 등)',
+    '   전부 숨김 — 실드에 가려 클릭도 안 되므로 시각적 소음만 됨 */',
+    'ytmusic-av-toggle, ytmusic-player-expanding-menu,',
+    'ytmusic-player .song-media-controls, #song-media-window .song-media-controls,',
+    'ytmusic-player #song-media-controls, ytmusic-player-page .player-controls-wrapper',
     '{ display:none !important; }',
+    '/* 자체 앨범아트 오버레이 (뮤직 DOM 과 무관하게 동작) */',
+    '#__mini_album { position:fixed; left:0; top:0; width:100%; height:100%;',
+    '  z-index:9450; display:none; background-color:#000;',
+    '  background-position:center; background-repeat:no-repeat;',
+    '  background-size:contain; }',
     '#__mini_grip { position:fixed; right:0; bottom:0; width:16px; height:16px;',
     '  z-index:10001; cursor:nwse-resize; opacity:0.45; }',
     '#__mini_grip:hover { opacity:1; }',
@@ -366,7 +373,9 @@ MINI_HOOK_JS = r"""
   var toastEl = document.createElement('div'); toastEl.id = '__mini_toast';
   var grip = document.createElement('div'); grip.id = '__mini_grip';
   var still = document.createElement('canvas'); still.id = '__mini_still';
+  var albumEl = document.createElement('div'); albumEl.id = '__mini_album';
   document.documentElement.appendChild(still);
+  document.documentElement.appendChild(albumEl);
   document.documentElement.appendChild(shield);
   document.documentElement.appendChild(urlbox);
   document.documentElement.appendChild(toastEl);
@@ -416,13 +425,31 @@ MINI_HOOK_JS = r"""
     if (b){ b.click(); toast('반복 모드 전환'); return; }
     toast('반복은 유튜브 뮤직에서만 돼요');
   }
-  // 뮤직의 노래(앨범아트) <-> 동영상 토글
-  function toggleAvMode(){
-    var tabs = document.querySelectorAll('ytmusic-av-toggle tp-yt-paper-tab');
-    if (!tabs.length){ toast('노래/영상 전환은 뮤직 재생 중에만 돼요'); return; }
-    for (var i = 0; i < tabs.length; i++){
-      if (!tabs[i].classList.contains('iron-selected')){ tabs[i].click(); return; }
+  // 앨범아트 보기 — 뮤직의 노래 모드 대신 우리가 직접 오버레이로 그린다.
+  // (뮤직 자체 노래 모드는 주입 레이아웃과 충돌해 이미지가 깨짐)
+  var albumOn = false;
+  function albumArtUrl(){
+    var img = document.querySelector('ytmusic-player-bar img');
+    var src = img && img.src ? img.src : '';
+    if (!src){
+      var v = vid();
+      if (v && v.poster) src = v.poster;
     }
+    // 플레이어바 썸네일(저해상도)을 고해상도로 승급
+    return src ? src.replace(/=w\d+-h\d+/, '=w544-h544') : '';
+  }
+  function refreshAlbum(){
+    if (!albumOn) return;
+    var u2 = albumArtUrl();
+    if (u2) albumEl.style.backgroundImage = "url('" + u2 + "')";
+  }
+  function toggleAvMode(){
+    if (location.host.indexOf('music.youtube.com') < 0){
+      toast('앨범 보기는 유튜브 뮤직에서만 돼요'); return;
+    }
+    albumOn = !albumOn;
+    if (albumOn){ refreshAlbum(); albumEl.style.display = 'block'; toast('앨범 보기'); }
+    else { albumEl.style.display = 'none'; toast('영상 보기'); }
   }
 
   function toWatchUrl(s){
@@ -476,6 +503,7 @@ MINI_HOOK_JS = r"""
     togglePlay: togglePlay, toggleMute: toggleMute, setVolume: setVolume,
     nextVideo: nextVideo, prevVideo: prevVideo,
     shuffleMusic: shuffleMusic, repeatMusic: repeatMusic, toggleAvMode: toggleAvMode,
+    isAlbum: function(){ return albumOn; },
     openUrl: openUrl, toast: toast, setStill: setStill
   };
 
@@ -580,6 +608,7 @@ MINI_HOOK_JS = r"""
     // (마지막 영상 저장은 파이썬 쪽에서 get_current_url 로 처리 —
     //  내비게이션 도중 JS→파이썬 호출의 반환 콜백이 사라지며
     //  pywebview 내부 스레드가 예외를 뱉는 문제를 피한다)
+    refreshAlbum();   // 곡이 바뀌면 앨범아트 갱신
     window.dispatchEvent(new Event('resize'));   // 플레이어 크기 갱신
   }, 2000);
  } catch (err) {
@@ -621,7 +650,7 @@ MENU_HTML = r"""<!DOCTYPE html>
 <script>
   var api = function(){ return (window.pywebview && window.pywebview.api) || null; };
   var st = { playing: false, muted: false, onTop: true, opacity: 100,
-             cham: false, still: false, stillSec: 10, volume: 100 };
+             cham: false, still: false, stillSec: 10, volume: 100, av: 'n' };
   var items = [
     ['play',       function(){ return st.playing ? '⏸ 일시정지' : '▶ 재생'; }],
     ['mute',       function(){ return st.muted ? '소리 켜기' : '음소거'; }],
@@ -634,7 +663,11 @@ MENU_HTML = r"""<!DOCTYPE html>
     ['mlib',       function(){ return '뮤직 재생목록'; }],
     ['shuffle',    function(){ return '셔플'; }],
     ['repeat',     function(){ return '반복 전환'; }],
-    ['avmode',     function(){ return '노래↔영상 전환'; }],
+    ['avmode',     function(){
+                     if (st.av === 'v') return '앨범 보기';
+                     if (st.av === 's') return '영상 보기';
+                     return '앨범/영상 전환';
+                   }],
     ['ontop',      function(){ return (st.onTop ? '✓ ' : '') + '항상 위'; }],
     ['cham',       function(){ return (st.cham ? '✓ ' : '') + '카멜레온 모드'; }],
     ['still',      function(){ return (st.still ? '✓ ' : '') + '스틸컷 재생'; }],
@@ -939,13 +972,21 @@ class Api:
                 self._notify.Dispose()
         except Exception:
             pass
-        for w in (self._menu, self._browser):
+        for w in (self._menu, self._browser, self._logwin):
             try:
                 if w is not None and w in webview.windows:
                     w.destroy()
             except Exception:
                 pass
-        self._window.destroy()
+        try:
+            self._window.destroy()
+        except Exception:
+            pass
+        # 창 파괴 후에도 백그라운드 스레드(주입 루프 등)가 프로세스를
+        # 붙잡아 좀비로 남지 않게 — 잠시 후 무조건 프로세스 종료
+        t = threading.Timer(1.5, os._exit, args=(0,))
+        t.daemon = True
+        t.start()
 
     # ---- 카멜레온 모드 ----
 
@@ -1236,15 +1277,23 @@ class Api:
             "stillSec": int(self._config.get("stillSec", 10)),
         }
         try:
+            # 재생/음소거/볼륨 + 앨범 보기 상태(s=앨범, v=영상, n=뮤직 아님)
             r = self._window.evaluate_js(
                 "(function(){var v=document.querySelector('video');"
-                "return v ? ((v.paused?'0':'1')+(v.muted?'1':'0')"
-                "+Math.round((v.volume||0)*100)) : '';})()"
+                "if(!v) return '';"
+                "var av='n';"
+                "if(location.host.indexOf('music.youtube.com')>=0){"
+                "av=(window.__mini&&__mini.isAlbum&&__mini.isAlbum())?'s':'v';}"
+                "return (v.paused?'0':'1')+(v.muted?'1':'0')"
+                "+Math.round((v.volume||0)*100)+'|'+av;})()"
             )
-            state["playing"] = bool(r and r[0] == "1")
-            state["muted"] = bool(r and len(r) > 1 and r[1] == "1")
-            if r and len(r) > 2:
-                state["volume"] = max(0, min(100, int(r[2:])))
+            parts = (r or "").split("|", 1)
+            s = parts[0]
+            state["playing"] = bool(s and s[0] == "1")
+            state["muted"] = bool(s and len(s) > 1 and s[1] == "1")
+            if s and len(s) > 2:
+                state["volume"] = max(0, min(100, int(s[2:])))
+            state["av"] = parts[1] if len(parts) > 1 else "n"
         except Exception:
             pass
         try:
@@ -1977,6 +2026,12 @@ def _keep_mini_injected(api):
         _log_file("apply_opacity failed: %r" % (e,))
     chrome_stripped = False
     while True:
+        # 미니 창이 닫혔으면 루프도 종료 — 프로세스가 좀비로 남지 않게
+        try:
+            if api._window not in webview.windows:
+                return
+        except Exception:
+            pass
         try:
             api._inject_mini_hook()
         except Exception:
@@ -2108,6 +2163,14 @@ def main():
     # 로그인 세션(쿠키)을 유지해 홈/구독 창에서 한 번 로그인하면 계속 사용.
     os.makedirs(PROFILE_DIR, exist_ok=True)
     webview.start(_keep_mini_injected, (api,), private_mode=False, storage_path=PROFILE_DIR)
+
+    # GUI 루프 종료(모든 창 닫힘) 후: 남은 백그라운드 스레드와 무관하게
+    # 프로세스를 확실히 종료해 좀비(뮤텍스 잔류 → '이미 실행 중' 팝업) 방지
+    try:
+        save_config(api._config)
+    except Exception:
+        pass
+    os._exit(0)
 
 
 if __name__ == "__main__":
