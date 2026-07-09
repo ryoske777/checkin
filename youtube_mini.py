@@ -28,6 +28,8 @@
   - 유튜브 자체 컨트롤은 우클릭 메뉴/키보드 단축키(스페이스, m 등)로 조작
   - 크기 조절: 우측 하단 손잡이 드래그 (메뉴 '기본 크기'로 복원)
   - 홈/구독 창에서 영상 클릭: 그 창은 닫히고 미니 플레이어에서 재생
+  - 트레이로 보내기: 창을 숨기고 우측 하단 트레이 아이콘으로 —
+    재생(소리)은 계속, 아이콘 좌클릭으로 복원, 우클릭 열기/종료
   - 카멜레온 모드: 다른 창(브라우저 등) 위에 올려두고 켜면 그 창과
     현재 탭(창 제목)을 호스트로 기억. 미니 자리가 실제로 다른 창에
     '가려졌을 때'만 같이 숨는다 — 다른 창이 활성화만 되고 호스트가
@@ -588,6 +590,7 @@ MENU_HTML = r"""<!DOCTYPE html>
     ['cham',       function(){ return (st.cham ? '✓ ' : '') + '카멜레온 모드'; }],
     ['still',      function(){ return (st.still ? '✓ ' : '') + '스틸컷 재생'; }],
     ['logs',       function(){ return '로그 보기'; }],
+    ['tray',       function(){ return '트레이로 보내기'; }],
     ['scale2',     function(){ return '크기 2배'; }],
     ['scale1',     function(){ return '기본 크기'; }],
     ['fullscreen', function(){ return '전체화면'; }],
@@ -684,6 +687,8 @@ class Api:
         self._menu = None
         self._menu_open = False
         self._logwin = None
+        self._notify = None       # 트레이 아이콘 (WinForms NotifyIcon)
+        self._in_tray = False
         self._engine_ok = False   # loaded 이벤트 수신 = WebView2 정상
         self._menu_w, self._menu_h = MENU_W, MENU_H
         self._config = config if isinstance(config, dict) else {}
@@ -876,6 +881,13 @@ class Api:
             save_config(self._config)
         except Exception:
             pass
+        # 트레이 아이콘이 잔류하지 않게 정리
+        try:
+            if self._notify is not None:
+                self._notify.Visible = False
+                self._notify.Dispose()
+        except Exception:
+            pass
         for w in (self._menu, self._browser):
             try:
                 if w is not None and w in webview.windows:
@@ -1007,6 +1019,8 @@ class Api:
             time.sleep(0.25)
             host = self._cham_host
             if not host:
+                continue
+            if self._in_tray:      # 트레이 상태에선 표시/숨김 관리 중단
                 continue
             try:
                 mini = self._hwnd_of(self._window)
@@ -1286,6 +1300,8 @@ class Api:
                 self.toggle_chameleon()
             elif name == "logs":
                 self.show_logs()
+            elif name == "tray":
+                self.toggle_tray()
             elif name == "still":
                 on = not self._config.get("stillOn", False)
                 self._config.update({"stillOn": on})
@@ -1305,6 +1321,116 @@ class Api:
                 self.minimize()
             elif name == "quit":
                 self.quit()
+        except Exception:
+            pass
+
+    # ---- 트레이 ----
+
+    def toggle_tray(self):
+        """창을 숨기고 우측 하단 트레이 아이콘으로 보낸다 (재생은 계속)."""
+        if self._in_tray:
+            self._restore_from_tray()
+            return
+        u = _user32()
+        mh = self._hwnd_of(self._window)
+        if u is None or not mh:
+            self._toast("트레이 기능은 Windows 전용이에요")
+            return
+        if not self._ensure_notify_icon():
+            self._toast("트레이 아이콘을 만들 수 없어요")
+            return
+        self._in_tray = True
+        self.hide_menu()
+        u.ShowWindow(mh, SW_HIDE)   # 화면·작업표시줄에서 숨김
+
+    def _ensure_notify_icon(self):
+        """트레이 아이콘 생성/표시 — 반드시 UI 스레드에서 (WinForms)."""
+        if self._notify is not None:
+            try:
+                self._notify.Visible = True
+                return True
+            except Exception:
+                self._notify = None
+        native = getattr(self._window, "native", None)
+        if native is None or not hasattr(native, "BeginInvoke"):
+            return False
+        done = threading.Event()
+        ok = [False]
+
+        def _make():
+            try:
+                from System.Windows.Forms import (NotifyIcon, ContextMenuStrip,
+                                                  ToolStripMenuItem)
+                from System.Drawing import Icon, SystemIcons
+                ni = NotifyIcon()
+                try:
+                    ni.Icon = Icon.ExtractAssociatedIcon(sys.executable)
+                except Exception:
+                    ni.Icon = SystemIcons.Application
+                ni.Text = "YT Mini"
+                menu = ContextMenuStrip()
+                mi_open = ToolStripMenuItem("열기")
+                mi_quit = ToolStripMenuItem("종료")
+                mi_open.Click += lambda s, e: self._restore_from_tray()
+                mi_quit.Click += lambda s, e: self.quit()
+                menu.Items.Add(mi_open)
+                menu.Items.Add(mi_quit)
+                ni.ContextMenuStrip = menu
+                ni.MouseClick += self._on_tray_click
+                ni.Visible = True
+                self._notify = ni
+                ok[0] = True
+            except Exception as e:
+                _log_file("notify icon create failed: %r" % (e,))
+            finally:
+                done.set()
+
+        try:
+            import System
+            native.BeginInvoke(System.Action(_make))
+        except Exception as e:
+            _log_file("notify icon invoke failed: %r" % (e,))
+            return False
+        done.wait(3)
+        return ok[0]
+
+    def _on_tray_click(self, sender, e):
+        try:
+            from System.Windows.Forms import MouseButtons
+            if e.Button != MouseButtons.Left:
+                return   # 우클릭은 ContextMenuStrip(열기/종료)이 처리
+        except Exception:
+            pass
+        self._restore_from_tray()
+
+    def _restore_from_tray(self):
+        self._in_tray = False
+        # 트레이 아이콘 숨김 (UI 스레드)
+        try:
+            if self._notify is not None:
+                native = getattr(self._window, "native", None)
+
+                def _hide_icon():
+                    try:
+                        self._notify.Visible = False
+                    except Exception:
+                        pass
+
+                try:
+                    import System
+                    native.BeginInvoke(System.Action(_hide_icon))
+                except Exception:
+                    _hide_icon()
+        except Exception:
+            pass
+        # 창 복원 (표시 + 최상위, 포커스 안 뺏음)
+        try:
+            u = _user32()
+            mh = self._hwnd_of(self._window)
+            if u and mh:
+                u.SetWindowPos(mh, HWND_TOPMOST, 0, 0, 0, 0,
+                               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                               | SWP_SHOWWINDOW)
         except Exception:
             pass
 
