@@ -327,6 +327,9 @@ MINI_HOOK_JS = r"""
     'ytd-masthead, #masthead-container, #secondary, #below, #comments,',
     '#guide, tp-yt-app-drawer, ytd-mini-guide-renderer,',
     '#cinematics, #cinematics-container { display:none !important; }',  // 앰비언트 모드 빛번짐 제거
+    '/* 채널 브랜딩 워터마크(우하단 로고 오버레이) 숨김.',
+    '   영상 픽셀 자체에 새겨진 방송사 로고는 CSS 로 제거 불가 */',
+    '.ytp-watermark { display:none !important; }',
     'body { overflow:hidden !important; }',
     '#page-manager { margin:0 !important; }',
     '#movie_player { position:fixed !important; left:0 !important; top:0 !important;',
@@ -775,6 +778,7 @@ class Api:
         self._browser = None
         self._menu = None
         self._menu_open = False
+        self._menu_ok = False     # 메뉴 창 loaded 수신 = 메뉴 WebView2 정상
         self._logwin = None
         self._notify = None       # 트레이 아이콘 (WinForms NotifyIcon)
         self._in_tray = False
@@ -1206,6 +1210,7 @@ class Api:
         """
         if self._menu is not None and self._menu in webview.windows:
             return
+        self._menu_ok = False
         try:
             kwargs = dict(
                 html=MENU_HTML,
@@ -1229,11 +1234,26 @@ class Api:
             self._menu = None
             _log_file("menu create failed: %r" % (e,))
             return
+        # loaded 수신 = 메뉴 WebView2 정상 신호. 이 신호가 없는 동안
+        # 메뉴 창에 evaluate_js 를 하면 무기한 블로킹된다 (아래 show_menu 참고)
+        try:
+            self._menu.events.loaded += self._on_menu_loaded
+        except AttributeError:
+            try:
+                self._menu.loaded += self._on_menu_loaded
+            except Exception:
+                pass
         # 작업표시줄에 'menu' 항목이 생기지 않게 (네이티브 준비 후 적용)
         for delay in (0.5, 2.0):
             t = threading.Timer(delay, self._menu_no_taskbar)
             t.daemon = True
             t.start()
+
+    def _on_menu_loaded(self, window=None):
+        self._menu_ok = True
+        if self._config.get("menuResetCount"):
+            self._config.update({"menuResetCount": 0})
+            self._persist_later()
 
     def _menu_no_taskbar(self):
         try:
@@ -1248,6 +1268,9 @@ class Api:
 
     def menu_resize(self, w, h):
         """메뉴 페이지가 측정한 실제 필요 크기(물리 px)로 창 크기 보정."""
+        # 메뉴 페이지 JS→파이썬 호출이 왔다 = 메뉴 창이 확실히 살아 있다
+        # (구버전 pywebview 에서 loaded 이벤트 연결이 실패한 경우 대비)
+        self._menu_ok = True
         try:
             self._menu_w, self._menu_h = int(w), int(h)
             if self._menu is not None and self._menu in webview.windows:
@@ -1288,42 +1311,16 @@ class Api:
         if self._menu is None or self._menu not in webview.windows:
             _log_file("show_menu: menu window unavailable")
             return
-        state = {
-            "onTop": bool(self._config.get("onTop", True)),
-            "opacity": int(self._config.get("opacity", 100)),
-            "cham": bool(self._cham_host),
-            "still": bool(self._config.get("stillOn", False)),
-            "stillSec": int(self._config.get("stillSec", 10)),
-        }
-        try:
-            # 재생/음소거/볼륨 + 앨범 보기 상태(s=앨범, v=영상, n=뮤직 아님)
-            r = self._window.evaluate_js(
-                "(function(){var v=document.querySelector('video');"
-                "if(!v) return '';"
-                "var av='n';"
-                "if(location.host.indexOf('music.youtube.com')>=0){"
-                "av=(window.__mini&&__mini.isAlbum&&__mini.isAlbum())?'s':'v';}"
-                "return (v.paused?'0':'1')+(v.muted?'1':'0')"
-                "+Math.round((v.volume||0)*100)+'|'+av;})()"
-            )
-            parts = (r or "").split("|", 1)
-            s = parts[0]
-            state["playing"] = bool(s and s[0] == "1")
-            state["muted"] = bool(s and len(s) > 1 and s[1] == "1")
-            if s and len(s) > 2:
-                state["volume"] = max(0, min(100, int(s[2:])))
-            state["av"] = parts[1] if len(parts) > 1 else "n"
-        except Exception:
-            pass
+        if not self._menu_ok:
+            _log_file("show_menu: menu page not loaded yet (WebView2 init?)")
         try:
             x, y = self._menu_pos(int(sx), int(sy))
-            try:
-                self._menu.evaluate_js(
-                    "window.setState && setState(%s)" % json.dumps(state, ensure_ascii=False)
-                )
-            except Exception:
-                pass
             self._menu_open = True
+            # 메뉴 창을 '먼저' 표시하고 상태(재생/음소거 등) 갱신은
+            # 백그라운드로 미룬다. evaluate_js 는 대상 창의 loaded 가
+            # 안 왔거나 내비게이션 중이면 무기한 블로킹될 수 있는데,
+            # 예전엔 그게 이 함수 안에서 먼저 실행돼 메뉴 창이 초기화에
+            # 실패한 세션에서는 우클릭이 영영 안 먹혔다.
             # 창은 항상 '표시' 상태 — 커서 위치로 이동시키는 것만으로 나타난다.
             # (위치+크기+최상위+표시를 SetWindowPos 한 번으로, 포커스 안 뺏음)
             u = _user32()
@@ -1337,12 +1334,58 @@ class Api:
                 except Exception:
                     pass
                 self._menu.move(x, y)
+            t = threading.Thread(target=self._push_menu_state, daemon=True)
+            t.start()
             # 바깥 클릭 감시 시작 (마우스 이동만으로는 닫히지 않음)
             t = threading.Thread(target=self._menu_outside_watch, daemon=True)
             t.start()
         except Exception as e:
             self._menu_open = False
             _log_file("show_menu failed: %r" % (e,))
+
+    def _push_menu_state(self):
+        """현재 상태를 수집해 메뉴 페이지에 반영 (백그라운드 전용).
+
+        미니/메뉴 어느 쪽 evaluate_js 가 블로킹돼도 우클릭 경로(show_menu)는
+        영향을 받지 않도록 반드시 별도 스레드에서 호출한다.
+        """
+        state = {
+            "onTop": bool(self._config.get("onTop", True)),
+            "opacity": int(self._config.get("opacity", 100)),
+            "cham": bool(self._cham_host),
+            "still": bool(self._config.get("stillOn", False)),
+            "stillSec": int(self._config.get("stillSec", 10)),
+        }
+        if self._engine_ok:      # 미니가 로드 전이면 질의 자체가 블로킹됨
+            try:
+                # 재생/음소거/볼륨 + 앨범 보기 상태(s=앨범, v=영상, n=뮤직 아님)
+                r = self._window.evaluate_js(
+                    "(function(){var v=document.querySelector('video');"
+                    "if(!v) return '';"
+                    "var av='n';"
+                    "if(location.host.indexOf('music.youtube.com')>=0){"
+                    "av=(window.__mini&&__mini.isAlbum&&__mini.isAlbum())?'s':'v';}"
+                    "return (v.paused?'0':'1')+(v.muted?'1':'0')"
+                    "+Math.round((v.volume||0)*100)+'|'+av;})()"
+                )
+                parts = (r or "").split("|", 1)
+                s = parts[0]
+                state["playing"] = bool(s and s[0] == "1")
+                state["muted"] = bool(s and len(s) > 1 and s[1] == "1")
+                if s and len(s) > 2:
+                    state["volume"] = max(0, min(100, int(s[2:])))
+                state["av"] = parts[1] if len(parts) > 1 else "n"
+            except Exception:
+                pass
+        if not self._menu_ok or not self._menu_open:
+            return
+        try:
+            if self._menu is not None and self._menu in webview.windows:
+                self._menu.evaluate_js(
+                    "window.setState && setState(%s)" % json.dumps(state, ensure_ascii=False)
+                )
+        except Exception:
+            pass
 
     def _menu_outside_watch(self):
         """메뉴가 열려 있는 동안 바깥 클릭을 전역 감시해 닫는다.
@@ -1933,6 +1976,18 @@ def _engine_watchdog(api):
     감지해 엔진 프로필(EBWebView)을 초기화하고 자동 재시작한다."""
     time.sleep(20)
     if api._engine_ok:
+        # 미니(영상)는 정상인데 팝업 메뉴 창만 초기화에 실패한 경우 —
+        # 우클릭해도 메뉴가 안 나오는 간헐 증상. 그대로 두면 재시작
+        # 전까지 복구되지 않으므로 자동 재시작한다 (연속 2회 한도,
+        # 메뉴가 정상 로드되면 카운터는 0 으로 복귀).
+        if not api._menu_ok:
+            count = int(api._config.get("menuResetCount", 0))
+            api._config.update({"menuResetCount": count + 1})
+            save_config(api._config)
+            _log_file("engine watchdog: menu window not loaded in 20s"
+                      " (relaunch %d/2)" % (count + 1,))
+            if count < 2:
+                _relaunch()
         return
     _log_file("engine watchdog: no loaded event in 20s (WebView2 init failure)")
     u = _user32()
