@@ -80,10 +80,51 @@
 
   /* Seat Map */
   .seat-section { margin-bottom: 16px; }
+  .seat-row-wrapper {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
   .seat-row {
     display: flex;
+    flex: 1;
     gap: 4px;
-    margin-bottom: 4px;
+    margin-bottom: 0;
+  }
+  .row-check {
+    flex-shrink: 0;
+    width: 30px;
+    border-radius: 9px;
+    border: 2px solid rgba(0,0,0,0.16);
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  }
+  .row-check:hover { border-color: rgba(0,0,0,0.32); }
+  .row-check:active { transform: scale(0.93); }
+  .row-check::after {
+    content: '';
+    width: 8px;
+    height: 14px;
+    margin-top: -2px;
+    border: solid #fff;
+    border-width: 0 3px 3px 0;
+    transform: rotate(40deg);
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+  .row-check.checked {
+    background: #22c55e;
+    border-color: #22c55e;
+  }
+  .row-check.checked::after {
+    opacity: 1;
   }
   .seat {
     position: relative;
@@ -389,7 +430,7 @@
 // '-' = empty seat, '' = empty seat
 const DEFAULT_SEAT_MAP = [
   [
-    ['민종호','조형진','-','송대호','윤현수','최서윤','-','-'],
+    ['민종호','조형진','양성우','송대호','윤현수','최서윤','-','-'],
   ],
   [
     ['염승현','김민희','옥동현','김윤수','김충현','장도은','이수빈','김재현'],
@@ -899,6 +940,8 @@ function renderResults(seatMap, statusMap, hourGroups, specialList, targetDate, 
     if (si > 0) seatHtml += '<div class="section-divider"></div>';
     seatHtml += '<div class="seat-section">';
     for (const row of seatMap[si]) {
+      seatHtml += '<div class="seat-row-wrapper">';
+      seatHtml += '<div class="row-check" onclick="toggleRowCheck(this)"></div>';
       seatHtml += '<div class="seat-row">';
       for (const name of row) {
         if (!name || name === '-') {
@@ -914,6 +957,7 @@ function renderResults(seatMap, statusMap, hourGroups, specialList, targetDate, 
           </div>`;
         }
       }
+      seatHtml += '</div>';
       seatHtml += '</div>';
     }
     seatHtml += '</div>';
@@ -978,6 +1022,14 @@ function renderResults(seatMap, statusMap, hourGroups, specialList, targetDate, 
 
 function toggleSeatCheck(el) {
   el.classList.toggle('checked');
+}
+
+function toggleRowCheck(el) {
+  const wrapper = el.parentElement;
+  const seats = wrapper.querySelectorAll('.seat:not(.seat-empty)');
+  const newState = !el.classList.contains('checked');
+  el.classList.toggle('checked', newState);
+  seats.forEach(s => s.classList.toggle('checked', newState));
 }
 
 function copyResult() {
