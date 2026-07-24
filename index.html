@@ -86,19 +86,27 @@
     margin-bottom: 4px;
   }
   .seat {
+    position: relative;
     flex: 1;
     min-width: 0;
-    padding: 8px 4px;
+    padding: 12px 6px 8px;
     border-radius: 6px;
     text-align: center;
     font-size: 0.8rem;
     font-weight: 600;
     border: 2px solid #e0e0e0;
     background: #f8f9fb;
+    cursor: pointer;
+    user-select: none;
+    transition: box-shadow 0.15s ease, border-color 0.15s ease;
+  }
+  .seat:not(.seat-empty):hover {
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.12);
   }
   .seat-empty {
     border: 2px dashed #ddd;
     background: transparent;
+    cursor: default;
   }
   .seat .seat-name {
     display: block;
@@ -114,6 +122,48 @@
   .seat-9 { background: #dbeafe; border-color: #93c5fd; }
   .seat-10 { background: #f3f4f6; border-color: #d1d5db; }
   .seat-note { background: #fef3c7; border-color: #fcd34d; }
+
+  /* Attendance check (per-session only, cleared on refresh) */
+  .seat-check {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    width: 22px;
+    height: 22px;
+    border-radius: 7px;
+    border: 2px solid rgba(0,0,0,0.2);
+    background: rgba(255,255,255,0.65);
+    box-sizing: border-box;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  }
+  .seat:not(.seat-empty):active .seat-check {
+    transform: scale(0.88);
+  }
+  .seat.checked {
+    border-color: #16a34a;
+    box-shadow: 0 0 0 1px #16a34a;
+  }
+  .seat.checked .seat-check {
+    background: #22c55e;
+    border-color: #22c55e;
+    animation: seatCheckPop 0.22s ease;
+  }
+  .seat.checked .seat-check::after {
+    content: '';
+    position: absolute;
+    left: 7px;
+    top: 3px;
+    width: 5px;
+    height: 10px;
+    border: solid #fff;
+    border-width: 0 2.5px 2.5px 0;
+    transform: rotate(40deg);
+  }
+  @keyframes seatCheckPop {
+    0% { transform: scale(0.55); }
+    65% { transform: scale(1.18); }
+    100% { transform: scale(1); }
+  }
 
   /* Legend */
   .legend {
@@ -857,7 +907,8 @@ function renderResults(seatMap, statusMap, hourGroups, specialList, targetDate, 
           const s = statusMap[name];
           const cls = s ? s.statusClass : 'seat-10';
           const txt = s ? s.statusText : defaultHour + '시';
-          seatHtml += `<div class="seat ${cls}">
+          seatHtml += `<div class="seat ${cls}" onclick="toggleSeatCheck(this)">
+            <span class="seat-check"></span>
             <span class="seat-name">${name}</span>
             <span class="seat-status">${txt}</span>
           </div>`;
@@ -923,6 +974,10 @@ function renderResults(seatMap, statusMap, hourGroups, specialList, targetDate, 
 
   contentEl.innerHTML = html;
   resultsEl.classList.add('show');
+}
+
+function toggleSeatCheck(el) {
+  el.classList.toggle('checked');
 }
 
 function copyResult() {
