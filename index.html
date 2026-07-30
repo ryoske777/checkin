@@ -228,6 +228,60 @@
     border: 1px solid #ccc;
   }
 
+  /* 8출 전용 toggle */
+  #results { position: relative; }
+  .only8-switch-wrap {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .only8-switch-wrap .only8-text {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #333;
+  }
+  .ios-switch {
+    position: relative;
+    display: inline-block;
+    width: 44px;
+    height: 25px;
+    flex-shrink: 0;
+  }
+  .ios-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+  .ios-switch .slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: #d1d5db;
+    border-radius: 25px;
+    transition: background 0.2s ease;
+  }
+  .ios-switch .slider::before {
+    content: '';
+    position: absolute;
+    height: 21px;
+    width: 21px;
+    left: 2px;
+    bottom: 2px;
+    background: #fff;
+    border-radius: 50%;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    transition: transform 0.2s ease;
+  }
+  .ios-switch input:checked + .slider {
+    background: #22c55e;
+  }
+  .ios-switch input:checked + .slider::before {
+    transform: translateX(19px);
+  }
+
   /* Results text */
   .result-group { margin-bottom: 14px; }
   .result-group:last-child { margin-bottom: 0; }
@@ -370,6 +424,13 @@
     <div class="card-header">
       <h2>조회 결과</h2>
       <button class="btn-secondary btn-small" onclick="copyResult()">복사</button>
+    </div>
+    <div class="only8-switch-wrap">
+      <span class="only8-text">8출 전용</span>
+      <label class="ios-switch">
+        <input type="checkbox" id="only8Toggle" onchange="onOnly8ToggleChange()">
+        <span class="slider"></span>
+      </label>
     </div>
     <div class="result-date" id="resultDate"></div>
     <div class="legend">
@@ -1024,13 +1085,46 @@ function toggleSeatCheck(el) {
   el.classList.toggle('checked');
 }
 
+function isOnly8Mode() {
+  const toggle = document.getElementById('only8Toggle');
+  return !!toggle && toggle.checked;
+}
+
 function toggleRowCheck(el) {
   const wrapper = el.parentElement;
-  const seats = wrapper.querySelectorAll('.seat:not(.seat-empty)');
+  const seats = isOnly8Mode()
+    ? wrapper.querySelectorAll('.seat.seat-8')
+    : wrapper.querySelectorAll('.seat:not(.seat-empty)');
+  if (seats.length === 0) return;
   const newState = !el.classList.contains('checked');
   el.classList.toggle('checked', newState);
   seats.forEach(s => s.classList.toggle('checked', newState));
 }
+
+// ===== 8출 전용 toggle (state remembered per PC via cookie) =====
+
+function setCookie(name, value, days) {
+  const d = new Date();
+  d.setTime(d.getTime() + days * 24 * 60 * 60 * 1000);
+  document.cookie = `${name}=${encodeURIComponent(value)};expires=${d.toUTCString()};path=/;SameSite=Lax`;
+}
+
+function getCookie(name) {
+  const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function onOnly8ToggleChange() {
+  const checked = document.getElementById('only8Toggle').checked;
+  setCookie('checkin_only8', checked ? '1' : '0', 365);
+}
+
+(function() {
+  const toggle = document.getElementById('only8Toggle');
+  if (toggle) {
+    toggle.checked = getCookie('checkin_only8') === '1';
+  }
+})();
 
 function copyResult() {
   const dateText = document.getElementById('resultDate').textContent;
